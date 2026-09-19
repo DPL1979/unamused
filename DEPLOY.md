@@ -24,7 +24,9 @@ WorkingDirectory=/home/unamused/app
 Environment=PATH=/home/unamused/app/.venv/bin
 Environment=GITHUB_URL=https://github.com/<you>/unamused
 Environment=SITE_URL=https://unamused.app
-ExecStart=/home/unamused/app/.venv/bin/gunicorn -w 2 -b 127.0.0.1:8000 app:app
+# Single worker with threads (not -w 2): the in-memory rate limiter is
+# per-process, so multiple workers would multiply the 10/hour limit.
+ExecStart=/home/unamused/app/.venv/bin/gunicorn -w 1 --threads 4 -b 127.0.0.1:8000 app:app
 Restart=always
 
 [Install]
