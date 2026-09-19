@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="220" height="72" viewBox="0 0 220 72">
+  <rect x="2" y="2" width="216" height="68" rx="16" fill="#1c1a17"/>
+  <circle cx="38" cy="36" r="18" fill="#2b4eff"/>
+  <path d="M30 36l6 6 11-12" stroke="#fff" stroke-width="3.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="64" y="34" font-family="-apple-system,'Segoe UI',Inter,sans-serif" font-size="21" font-weight="800" fill="#f5f2ea" letter-spacing="1">AMUSED</text>
+  <text x="64" y="52" font-family="-apple-system,'Segoe UI',Inter,sans-serif" font-size="11" font-weight="600" fill="#b9b3a6" letter-spacing="3">CERTIFIED</text>
+</svg>

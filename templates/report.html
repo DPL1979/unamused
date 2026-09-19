@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Audit result — {{ r.score }}/100 · Unamused{% endblock %}
+{% block content %}
+<section class="wrap report">
+  <p class="meta">{{ r.url }}<br>Audited {{ r.audited_at[:10] }}</p>
+
+  {% if r.error %}
+    <h1>Couldn't audit this site</h1>
+    <p class="lede">{{ r.error }}</p>
+    <p><a href="/">Try another address →</a></p>
+  {% else %}
+  <div class="score-row">
+    <svg viewBox="0 0 120 120" class="dial" role="img" aria-label="Score {{ r.score }} out of 100">
+      <circle cx="60" cy="60" r="54" class="dial-bg"/>
+      <circle cx="60" cy="60" r="54" class="dial-fg g-{{ r.grade|replace(' ', '-')|lower }}"
+              stroke-dasharray="{{ (r.score / 100 * 339.3)|round(1) }} 339.3"/>
+      <text x="60" y="70" class="dial-num">{{ r.score }}</text>
+    </svg>
+    <div>
+      <div class="grade">{{ r.grade }}</div>
+      <p class="lede small">How ready this site is for AI agents to read, recommend, and transact.</p>
+    </div>
+  </div>
+
+  <h2>Checks</h2>
+  <table class="checks-table">
+    <tr><th>Check</th><th>Result</th><th>Score</th><th>Detail</th></tr>
+    {% for c in r.checks %}
+    <tr>
+      <td><b>{{ c.name }}</b></td>
+      <td><span class="pill {{ c.status }}">{{ c.status }}</span></td>
+      <td>{{ c.score }}/{{ c.weight }}</td>
+      <td>{{ c.detail }}</td>
+    </tr>
+    {% endfor %}
+  </table>
+
+  <h2>Prioritized fixes</h2>
+  {% if r.recommendations %}
+    {% for x in r.recommendations %}
+    <div class="rec"><b>[{{ x.priority }}] {{ x.check }}</b>{{ x.fix }}</div>
+    {% endfor %}
+  {% else %}
+    <p>Nothing to fix — this site is agent-ready. 🎉</p>
+  {% endif %}
+
+  <div class="cta-box">
+    <h3>Get every fix, generated free</h3>
+    <p>Your personalized Fix Kit: curated <code>llms.txt</code>, pre-filled schema.org
+    markup, robots &amp; social tags, plus step-by-step install guides for WordPress,
+    Wix, Squarespace, Shopify, and custom sites.</p>
+    <p><a class="btn light" href="/kit/{{ rid }}">Download free Fix Kit (.zip)</a></p>
+  </div>
+
+  <div class="lead-strip">
+    <p><b>Want the Amused badge?</b> Implement the kit, then
+    <a href="/">re-audit free</a> — score 85+ and the badge is yours.</p>
+  </div>
+
+  <p class="audit-again"><a href="/">← Audit another site</a></p>
+  <p class="fine">Methodology: weighted toward what lets an agent complete a task — structured
+  business data and a machine-usable action surface (booking/ordering). llms.txt is checked
+  but lightly weighted: 2026 server-log studies show ~97% of llms.txt files receive zero
+  requests and no major AI provider confirms consuming it. We score it as cheap hygiene,
+  not a lever. No snake oil.</p>
+  {% endif %}
+</section>
+{% endblock %}

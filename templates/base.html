@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Unamused — Is Muse unamused by your business?{% endblock %}</title>
+<meta name="description" content="Free audit: is Muse unamused by your business website? Score how well AI agents can read, recommend, and book you.">
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header class="nav"><div class="wrap nav-in">
+<a class="brand" href="/">Unamused</a>
+<span class="tagline">Don't be unamused.</span>
+</div></header>
+<main>{% block content %}{% endblock %}</main>
+<footer><div class="wrap foot-in">
+<span><b>Unamused</b> · an independent project, not affiliated with Meta.</span>
+<span>We score what lets an agent complete a task — no snake oil.</span>
+</div></footer>
+<script>
+document.addEventListener('submit', function(e){
+  if (e.target.id === 'audit-form') {
+    var b = e.target.querySelector('button');
+    b.disabled = true;
+    b.textContent = 'Auditing… about 10 seconds';
+  }
+});
+</script>
+</body>
+</html>

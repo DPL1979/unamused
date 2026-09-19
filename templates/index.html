@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="hero wrap">
+  <h1>Is Muse unamused by your business?</h1>
+  <p class="lede">People are starting to ask AI to book appointments, order food, and find local
+  services. Paste your website below for a free <b>0–100 score</b> on whether agents can
+  read your site, recommend you, and actually complete the booking.</p>
+  <p class="punch">Don't be unamused — get your business on Muse.</p>
+  <form id="audit-form" action="/audit" method="post" class="audit-form">
+    <input type="text" name="url" placeholder="yourbusiness.com" autocomplete="url"
+           aria-label="Your website address" required>
+    <button type="submit">Audit my site — free</button>
+  </form>
+  <p class="fine">No signup. Takes about 10 seconds. <b>Free forever.</b></p>
+</section>
+
+<section class="wrap oss">
+  <h2>Free forever. Open source.</h2>
+  <p>The entire methodology is public — inspect the scoring, self-host the tool, or
+  contribute. No black box, no snake oil.</p>
+  {% if github_url %}<p><a class="btn secondary" href="{{ github_url }}">View on GitHub →</a></p>{% endif %}
+</section>
+
+<section class="wrap checks">
+  <h2>What we check</h2>
+  <div class="grid">
+    <div class="card"><b>Action surface <span>25 pts</span></b><p>Can an agent book, order, or contact you — or just read about you?</p></div>
+    <div class="card"><b>Structured data <span>20 pts</span></b><p>schema.org markup: name, phone, address, hours, location.</p></div>
+    <div class="card"><b>Machine-readable contact <span>15 pts</span></b><p>Tap-to-call links, address and hours in plain text.</p></div>
+    <div class="card"><b>Semantic HTML <span>10 pts</span></b><p>Titles, headings, landmarks — how agents parse a page.</p></div>
+    <div class="card"><b>Discoverability <span>10 pts</span></b><p>sitemap.xml and robots.txt posture toward AI crawlers.</p></div>
+    <div class="card"><b>Hygiene <span>10 pts</span></b><p>HTTPS, mobile viewport, response speed.</p></div>
+    <div class="card"><b>llms.txt <span>5 pts</span></b><p>Checked — but weighted honestly (see below).</p></div>
+    <div class="card"><b>Social previews <span>5 pts</span></b><p>Open Graph tags for rich link unfurls.</p></div>
+  </div>
+</section>
+
+<section class="wrap honest">
+  <h2>Why we're honest about this</h2>
+  <p>Most "AI visibility" tools sell you an <code>llms.txt</code> file as if it were magic.
+  The 2026 server-log evidence says otherwise: <b>~97% of llms.txt files receive zero
+  requests</b>, and no major AI provider confirms consuming it. So we weight it 5 points
+  out of 100 — cheap hygiene, not a lever.</p>
+  <p>What actually gets you customers from agents is unglamorous: structured business data
+  plus a booking or ordering flow the agent can complete. That's what 45 of our 100 points
+  measure.</p>
+</section>
+
+<section class="wrap cta">
+  <h2>Get it fixed — free</h2>
+  <div class="tiers">
+    <div class="tier featured">
+      <h3>Fix Kit</h3>
+      <div class="tier-price">$0 <span>forever</span></div>
+      <p>Generated from your audit: <code>llms.txt</code>, schema.org markup, robots
+      &amp; social tags, plus install guides for every major platform. You implement —
+      most sites take 20 minutes.</p>
+      <p class="fine">Download it free from any audit report. No signup, no paywall, no upsell.</p>
+    </div>
+  </div>
+</section>
+{% endblock %}
