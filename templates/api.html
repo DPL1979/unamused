@@ -69,6 +69,21 @@
   for Meta's Muse directory. Build one from any audit report's
   <b>“Create your Agent API”</b> button.</p>
 
+  <h2>The Unamused Connector (one connector, every business)</h2>
+  <p>Per-business APIs are portable to any agent. The <a href="/connector">Unamused
+  Connector</a> is the single aggregator for Muse: connect it once as a Custom
+  connector (Settings → Connectors → Custom) and reach every hosted business
+  conversationally — <code>search_businesses</code> → <code>get_business</code> →
+  <code>call_action</code>.</p>
+  <div class="kit-file">
+    <div class="kit-file-head"><code>connector endpoints</code>
+      <button class="copy-btn" onclick="copyFile(this, 'api5')">Copy</button></div>
+    <pre id="api5">POST https://unamused.app/connector/mcp          # MCP server (tools/list, tools/call)
+GET  https://unamused.app/connector/businesses?q=  # search hosted businesses
+GET  https://unamused.app/connector/openapi.json   # OpenAPI 3.1 spec
+GET  https://unamused.app/connector/manifest.json  # connector manifest</pre>
+  </div>
+
   <h2>Rules</h2>
   <ul>
     <li>Only public websites. Private, loopback, and non-routable addresses are rejected (SSRF guard).</li>
