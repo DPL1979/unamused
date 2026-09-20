@@ -93,6 +93,42 @@ def main():
           not any(w in kit_all for w in paid_words),
           str([w for w in paid_words if w in kit_all]))
 
+    r = c.get("/k/" + rid)
+    check("kit page 200", r.status_code == 200, str(r.status_code))
+    kp = r.data.decode("utf-8", "replace")
+    check("kit page lists files", "llms.txt" in kp and "schema-jsonld.html" in kp)
+    check("kit page has copy buttons",
+          kp.count('class="copy-btn"') == kp.count('<pre id="kf') and kp.count('class="copy-btn"') >= 1,
+          "%d buttons, %d pres" % (kp.count('class="copy-btn"'), kp.count('<pre id="kf')))
+    check("kit page links zip", ("/kit/" + rid) in kp)
+
+    r = c.get("/api")
+    check("api docs 200", r.status_code == 200 and b"/api/v1/audit" in r.data,
+          str(r.status_code))
+
+    r = c.post("/api/v1/audit", json={"url": "https://example.com"})
+    check("api audit 200 json", r.status_code == 200 and r.is_json, str(r.status_code))
+    aj = r.get_json()
+    check("api audit shape",
+          aj.get("score") is not None and aj.get("report_url", "").endswith("/r/" + aj.get("report_url", "").rsplit("/", 1)[-1]),
+          str(sorted(aj.keys())))
+    check("api audit kit links",
+          "/k/" in aj.get("kit_page_url", "") and "/kit/" in aj.get("kit_zip_url", ""))
+
+    r = c.get("/api/v1/report/" + rid)
+    check("api report 200 json", r.status_code == 200 and r.is_json, str(r.status_code))
+    check("api report has checks", isinstance(r.get_json().get("checks"), list))
+
+    r = c.get("/api/v1/kit/" + rid)
+    check("api kit 200 json", r.status_code == 200 and r.is_json, str(r.status_code))
+    kj = r.get_json()
+    check("api kit has files",
+          isinstance(kj.get("files"), dict) and "llms.txt" in kj["files"],
+          str(sorted(kj.get("files", {}).keys())))
+
+    r = c.post("/api/v1/audit", json={"url": "not a url"})
+    check("api audit 400 on bad url", r.status_code == 400, str(r.status_code))
+
     print("\n%d failures" % len(fails))
     sys.exit(1 if fails else 0)
 
