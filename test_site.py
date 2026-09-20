@@ -612,6 +612,67 @@ def main():
     r = c.get("/")
     check("footer links badge page", b'href="/badge"' in r.data)
 
+    # ---- Analytics (first-party server-side counters) ----
+    import datetime as _dt
+    today = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m-%d")
+    afile = os.path.join(webapp.DATA_DIR, "analytics.json")
+
+    def acounts():
+        try:
+            with open(afile) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+
+    before = acounts().get("%s|badge_hit" % today, 0)
+    r = c.get("/badge.svg", headers={"Referer": "https://shopexample.com/p"})
+    check("badge.svg 200 svg",
+          r.status_code == 200 and b"<svg" in r.data, str(r.status_code))
+    after = acounts()
+    check("badge_hit counted",
+          after.get("%s|badge_hit" % today, 0) == before + 1)
+    check("badge referer host counted",
+          after.get("%s|ref|shopexample.com" % today, 0) >= 1)
+    r = c.get("/static/badge.svg")
+    check("static badge still served", r.status_code == 200)
+
+    b_before = acounts().get("%s|badge_page" % today, 0)
+    c.get("/badge")
+    check("badge_page counted",
+          acounts().get("%s|badge_page" % today, 0) == b_before + 1)
+
+    k_before = acounts().get("%s|connector_call" % today, 0)
+    c.get("/connector/businesses")
+    check("connector_call counted on businesses",
+          acounts().get("%s|connector_call" % today, 0) == k_before + 1)
+
+    a_before = acounts().get("%s|audit_run" % today, 0)
+    r = c.post("/audit", data={"url": "https://example.com"})
+    if r.status_code in (301, 302, 303):
+        check("audit_run counted",
+              acounts().get("%s|audit_run" % today, 0) == a_before + 1)
+        rid2 = r.headers["Location"].rsplit("/", 1)[-1]
+        v_before = acounts().get("%s|report_view" % today, 0)
+        c.get("/r/" + rid2)
+        check("report_view counted",
+              acounts().get("%s|report_view" % today, 0) == v_before + 1)
+
+    r = c.get("/stats")
+    sj = r.get_json()
+    check("stats 200 with totals",
+          r.status_code == 200 and "totals" in sj and "by_day" in sj
+          and sj["totals"].get("badge_hit", 0) >= 1, str(r.status_code))
+    check("stats notes no-tracking",
+          "No cookies" in sj.get("note", ""))
+    r = c.get("/")
+    check("footer privacy note", b"No cookies" in r.data)
+
+    with open(afile, "w") as f:
+        f.write("not json{{{")
+    r = c.get("/badge.svg")
+    check("analytics never breaks requests on corrupt file",
+          r.status_code == 200, str(r.status_code))
+
     print("\n%d failures" % len(fails))
     sys.exit(1 if fails else 0)
 
