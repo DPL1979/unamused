@@ -326,8 +326,11 @@ def main():
     r = agentapi.aggregator_mcp_handle(
         webapp.DATA_DIR, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     tools = r["result"]["tools"]
-    check("agg mcp 3 tools",
-          [t["name"] for t in tools] == ["search_businesses", "get_business", "call_action"],
+    check("agg mcp 7 tools",
+          [t["name"] for t in tools] == ["search_businesses", "get_business",
+                                        "call_action", "get_action_status",
+                                        "get_changes", "request_deletion",
+                                        "confirm_deletion"],
           str([t["name"] for t in tools]))
     check("agg call_action destructiveHint",
           next(t for t in tools if t["name"] == "call_action")
@@ -414,7 +417,7 @@ def main():
     r = c.post("/connector/mcp",
                json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     check("connector mcp tools/list",
-          r.status_code == 200 and len(r.get_json()["result"]["tools"]) == 3,
+          r.status_code == 200 and len(r.get_json()["result"]["tools"]) == 7,
           str(r.status_code))
     r = c.post("/connector/mcp",
                json={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
@@ -611,6 +614,161 @@ def main():
           b"embed snippet" in r.data and b"copy-btn" in r.data)
     r = c.get("/")
     check("footer links badge page", b'href="/badge"' in r.data)
+
+    # ---- Pollable status / changes ----
+    st_biz = agentapi.build_record("Status Test Biz", "https://example.com", [good])
+    with open(os.path.join(webapp.DATA_DIR, "agentapi-%s.json" % st_biz["id"]), "w") as f:
+        json.dump(st_biz, f)
+    ok, res = agentapi.execute_action(st_biz, "book_visit", {"name": "Jane"},
+                                      data_dir=webapp.DATA_DIR)
+    check("execute_action returns log_id",
+          ok and res.get("log_id", "").startswith("log_"), str(res)[:120])
+    lid = res["log_id"]
+
+    r = c.get("/a/%s/status" % st_biz["id"])
+    sj = r.get_json()
+    check("per-business status 200",
+          r.status_code == 200 and sj.get("status") == "active", str(r.status_code))
+    check("status has per-action info",
+          sj["actions"]["book_visit"]["executions"] == 1
+          and sj["actions"]["book_visit"]["last_status"] == "handoff")
+    check("status documents poll interval",
+          sj.get("recommended_poll_interval_seconds") == 300)
+
+    r = c.get("/connector/businesses/%s/status" % st_biz["id"])
+    check("connector business status 200",
+          r.status_code == 200 and r.get_json()["business_id"] == st_biz["id"],
+          str(r.status_code))
+    r = c.get("/connector/businesses/0123456789ab/status")
+    check("business status 404 on unknown", r.status_code == 404, str(r.status_code))
+
+    r = c.get("/connector/action-log/" + lid)
+    check("action-log 200",
+          r.status_code == 200 and r.get_json()["log_id"] == lid
+          and r.get_json()["status"] == "handoff", str(r.status_code))
+    r = c.get("/connector/action-log/log_nonexistent")
+    check("action-log 404 on unknown", r.status_code == 404, str(r.status_code))
+
+    r = c.get("/connector/changes")
+    check("changes 400 without since", r.status_code == 400, str(r.status_code))
+    r = c.get("/connector/changes?since=not-a-time")
+    check("changes 400 on bad since", r.status_code == 400, str(r.status_code))
+    r = c.get("/connector/changes?since=2000-01-01T00:00:00Z")
+    cj = r.get_json()
+    check("changes delta works",
+          r.status_code == 200 and cj["change_count"] >= 1
+          and any(x["type"] == "action_executed" and x["log_id"] == lid
+                  for x in cj["changes"]))
+    r = c.get("/connector/changes?since=2000-01-01T00:00:00Z&business_id=" + st_biz["id"])
+    check("changes business filter",
+          all(x["business_id"] == st_biz["id"] for x in r.get_json()["changes"]))
+    r = c.get("/connector/changes?since=2999-01-01T00:00:00Z")
+    check("changes empty in future", r.get_json()["change_count"] == 0)
+    r = c.get("/a/%s/changes?since=2000-01-01T00:00:00Z" % st_biz["id"])
+    check("per-business changes 200", r.status_code == 200, str(r.status_code))
+
+    r = agentapi.aggregator_mcp_handle(
+        webapp.DATA_DIR, {"jsonrpc": "2.0", "id": 20, "method": "tools/call",
+                          "params": {"name": "get_action_status",
+                                     "arguments": {"log_id": lid}}})
+    check("agg mcp get_action_status",
+          not r["result"].get("isError") and lid in r["result"]["content"][0]["text"])
+    r = agentapi.aggregator_mcp_handle(
+        webapp.DATA_DIR, {"jsonrpc": "2.0", "id": 21, "method": "tools/call",
+                          "params": {"name": "get_changes",
+                                     "arguments": {"since": "2000-01-01T00:00:00Z"}}})
+    check("agg mcp get_changes",
+          not r["result"].get("isError")
+          and "action_executed" in r["result"]["content"][0]["text"])
+    r = agentapi.aggregator_mcp_handle(
+        webapp.DATA_DIR, {"jsonrpc": "2.0", "id": 22, "method": "tools/call",
+                          "params": {"name": "get_changes",
+                                     "arguments": {"since": "junk"}}})
+    check("agg mcp get_changes bad since isError",
+          r["result"].get("isError") is True)
+
+    # ---- Deletion ("forget me") ----
+    r = c.post("/connector/deletion/request", json={"business_id": "0123456789ab"})
+    check("deletion request 400 on unknown", r.status_code == 400, str(r.status_code))
+    r = c.post("/a/%s/deletion/request" % st_biz["id"])
+    dj = r.get_json()
+    check("per-business deletion request 200 + token",
+          r.status_code == 200 and dj.get("deletion_token")
+          and dj.get("confirmation_required") is True, str(r.status_code))
+    check("deletion request lists what will be deleted",
+          dj["will_delete"]["action_log_entries"] == 1
+          and dj["will_delete"]["business_record"] is True)
+    dtok = dj["deletion_token"]
+    r = c.post("/a/%s/deletion/confirm" % st_biz["id"], json={"deletion_token": "bogus"})
+    check("deletion confirm 400 on bad token", r.status_code == 400, str(r.status_code))
+    r = c.post("/a/%s/deletion/confirm" % st_biz["id"], json={"deletion_token": dtok})
+    cr = r.get_json()
+    check("deletion confirm deletes + receipt",
+          r.status_code == 200 and cr.get("deleted") is True
+          and cr.get("receipt_id", "").startswith("del_"), str(cr)[:160])
+    check("deletion removed record",
+          agentapi.load_record(webapp.DATA_DIR, st_biz["id"]) is None)
+    check("deletion removed log entries",
+          agentapi.get_log_entry(webapp.DATA_DIR, lid) is None)
+    r = c.post("/a/%s/deletion/confirm" % st_biz["id"], json={"deletion_token": dtok})
+    check("deletion token single-use", r.status_code == 400, str(r.status_code))
+    r = c.get("/connector/businesses/%s/status" % st_biz["id"])
+    sj2 = r.get_json()
+    check("status shows deleted tombstone",
+          r.status_code == 200 and sj2["status"] == "deleted"
+          and sj2["receipt_id"] == cr["receipt_id"])
+    r = c.get("/connector/changes?since=2000-01-01T00:00:00Z&business_id=" + st_biz["id"])
+    check("changes includes deletion",
+          any(x["type"] == "business_deleted" for x in r.get_json()["changes"]))
+
+    # deletion via the connector MCP tools, on a fresh throwaway business
+    del_biz = agentapi.build_record("Delete Me Biz", "https://example.com", [good])
+    with open(os.path.join(webapp.DATA_DIR, "agentapi-%s.json" % del_biz["id"]), "w") as f:
+        json.dump(del_biz, f)
+    r = agentapi.aggregator_mcp_handle(
+        webapp.DATA_DIR, {"jsonrpc": "2.0", "id": 23, "method": "tools/call",
+                          "params": {"name": "request_deletion",
+                                     "arguments": {"business_id": del_biz["id"]}}})
+    check("agg mcp request_deletion", not r["result"].get("isError")
+          and "deletion_token" in r["result"]["content"][0]["text"])
+    mtok = json.loads(r["result"]["content"][0]["text"])["deletion_token"]
+    r = agentapi.aggregator_mcp_handle(
+        webapp.DATA_DIR, {"jsonrpc": "2.0", "id": 24, "method": "tools/call",
+                          "params": {"name": "confirm_deletion",
+                                     "arguments": {"deletion_token": mtok}}})
+    check("agg mcp confirm_deletion",
+          not r["result"].get("isError")
+          and "receipt_id" in r["result"]["content"][0]["text"])
+    check("mcp deletion removed record",
+          agentapi.load_record(webapp.DATA_DIR, del_biz["id"]) is None)
+
+    # ---- Connector brief page ----
+    r = c.get("/connector/brief")
+    bp = r.data.decode("utf-8", "replace")
+    check("brief page 200",
+          r.status_code == 200 and "connector brief" in bp, str(r.status_code))
+    check("brief has endpoints + tools",
+          "/connector/mcp" in bp and "request_deletion" in bp
+          and "approval_token" in bp)
+    check("brief has forget-me flow", "forget me" in bp.lower())
+    check("brief documents polling", "300" in bp and "5 minutes" in bp)
+    check("brief no external JS",
+          "<script src" not in bp and "googletagmanager" not in bp.lower())
+    check("brief states independence",
+          "not affiliated with Meta" in bp)
+    import datetime as _dt2
+    today2 = _dt2.datetime.now(_dt2.timezone.utc).strftime("%Y-%m-%d")
+
+    def ac2():
+        try:
+            with open(os.path.join(webapp.DATA_DIR, "analytics.json")) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return {}
+    bb = ac2().get("%s|brief_page" % today2, 0)
+    c.get("/connector/brief")
+    check("brief_page counted",
+          ac2().get("%s|brief_page" % today2, 0) == bb + 1)
 
     # ---- Analytics (first-party server-side counters) ----
     import datetime as _dt
