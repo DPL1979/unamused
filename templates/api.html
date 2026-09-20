@@ -1,0 +1,94 @@
+{% extends "base.html" %}
+{% block title %}API — Unamused{% endblock %}
+{% block content %}
+<section class="wrap">
+  <p class="meta">Unamused API v1</p>
+  <h1>Use Unamused from your own code</h1>
+  <p class="lede">Free JSON API. Audit any public business website, fetch the report,
+  or pull the generated Fix Kit files — from your backend, your CI, or an AI agent.
+  No signup, no key. Rate limit: 10 calls/hour per IP per endpoint family.</p>
+
+  <h2>Audit a site</h2>
+  <div class="kit-file">
+    <div class="kit-file-head"><code>POST /api/v1/audit</code>
+      <button class="copy-btn" onclick="copyFile(this, 'api1')">Copy</button></div>
+    <pre id="api1">curl -X POST https://unamused.app/api/v1/audit \
+  -H 'Content-Type: application/json' \
+  -d '{"url": "https://example.com"}'</pre>
+  </div>
+  <p>Returns the score, grade, per-check breakdown, prioritized recommendations,
+  and links to the human-readable report, the Fix Kit web page, and the kit zip:</p>
+  <div class="kit-file">
+    <div class="kit-file-head"><code>response</code>
+      <button class="copy-btn" onclick="copyFile(this, 'api2')">Copy</button></div>
+    <pre id="api2">{
+  "url": "https://example.com/",
+  "score": 79,
+  "grade": "Almost amused",
+  "checks": [
+    {"name": "Action surface", "weight": 25, "score": 15,
+     "status": "warn", "detail": "..."}
+  ],
+  "recommendations": [
+    {"priority": "High", "check": "Structured business data",
+     "fix": "Add missing schema.org fields: ..."}
+  ],
+  "audited_at": "2026-09-20T03:00:00+00:00",
+  "report_url": "https://unamused.app/r/9d7fdef9f5d6",
+  "kit_page_url": "https://unamused.app/k/9d7fdef9f5d6",
+  "kit_zip_url": "https://unamused.app/kit/9d7fdef9f5d6"
+}</pre>
+  </div>
+
+  <h2>Fetch a report</h2>
+  <div class="kit-file">
+    <div class="kit-file-head"><code>GET /api/v1/report/&lt;id&gt;</code>
+      <button class="copy-btn" onclick="copyFile(this, 'api3')">Copy</button></div>
+    <pre id="api3">curl https://unamused.app/api/v1/report/9d7fdef9f5d6</pre>
+  </div>
+
+  <h2>Fetch the Fix Kit files</h2>
+  <div class="kit-file">
+    <div class="kit-file-head"><code>GET /api/v1/kit/&lt;id&gt;</code>
+      <button class="copy-btn" onclick="copyFile(this, 'api4')">Copy</button></div>
+    <pre id="api4">curl https://unamused.app/api/v1/kit/9d7fdef9f5d6</pre>
+  </div>
+  <p>Returns <code>{"files": {"llms.txt": "...", "schema-jsonld.html": "...",
+  "guides/wordpress.md": "...", ...}}</code> — every generated file as a string,
+  ready to write to disk or paste into a CMS.</p>
+
+  <h2>For AI agents</h2>
+  <p>Building an agent (on Muse or anywhere else) that onboards local businesses?
+  POST your customer's homepage to <code>/api/v1/audit</code>, then GET
+  <code>/api/v1/kit/&lt;id&gt;</code> and apply the files with their platform's
+  guide. Re-audit to confirm the score moved. That's the whole integration.</p>
+
+  <h2>Rules</h2>
+  <ul>
+    <li>Only public websites. Private, loopback, and non-routable addresses are rejected (SSRF guard).</li>
+    <li>10 audits/hour and 10 kit generations/hour per IP. Need more? Open an issue on GitHub.</li>
+    <li>Methodology is public — <a href="https://github.com/DPL1979/unamused">source on GitHub</a> (MIT).</li>
+  </ul>
+</section>
+<script>
+function copyFile(btn, id) {
+  var t = document.getElementById(id).innerText;
+  function done() {
+    btn.textContent = 'Copied ✓';
+    setTimeout(function(){ btn.textContent = 'Copy'; }, 1600);
+  }
+  function fallback() {
+    var ta = document.createElement('textarea');
+    ta.value = t;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); done(); }
+    catch (e) { btn.textContent = 'Copy failed'; }
+    document.body.removeChild(ta);
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(t).then(done, fallback);
+  } else { fallback(); }
+}
+</script>
+{% endblock %}
