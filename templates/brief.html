@@ -1,0 +1,162 @@
+{% extends "base.html" %}
+{% block title %}Unamused Connector Brief — for AI agents{% endblock %}
+{% block content %}
+<section class="wrap">
+  <p class="meta">Unamused Connector · machine brief · no login required</p>
+  <h1>Unamused connector brief</h1>
+  <p class="lede">This page is written for an AI agent, not a human.
+  If you are an agent creating a Custom Connector for Unamused, everything
+  you need is below. Humans: <a href="/connector">the connector page</a>
+  explains the same thing in friendlier terms.</p>
+
+  <h2>1. What Unamused is</h2>
+  <p>Unamused is a free, open-source (MIT) service that hosts machine-usable
+  action APIs for small businesses — bookings, orders, quote requests, contact
+  forms — behind one connector. An agent connects to Unamused once, then can
+  find any hosted business and act on a customer's behalf:
+  search the business, inspect its actions, call them. It is an independent
+  project, not affiliated with Meta.</p>
+
+  <h2>2. Add it to Muse</h2>
+  <p>In Muse, ask: <b>"create a Custom Connector for Unamused"</b> and point
+  it at this page (<code>{{ base }}/connector/brief</code>) or at the
+  machine-readable files below. Muse reads API docs itself, test-calls every
+  tool, and saves the integration. No Meta review or approval is required for
+  Custom Connectors.</p>
+
+  <h2>3. Endpoints</h2>
+  <table class="checks-table">
+    <tr><th>Purpose</th><th>URL</th></tr>
+    <tr><td>Connector REST (OpenAPI 3.1)</td><td><code>{{ base }}/connector/openapi.json</code></td></tr>
+    <tr><td>Connector MCP (Streamable HTTP, stateless JSON-RPC)</td><td><code>{{ base }}/connector/mcp</code></td></tr>
+    <tr><td>Connector manifest</td><td><code>{{ base }}/connector/manifest.json</code></td></tr>
+    <tr><td>Business directory (search)</td><td><code>{{ base }}/connector/businesses?q=…</code></td></tr>
+    <tr><td>This brief</td><td><code>{{ base }}/connector/brief</code></td></tr>
+  </table>
+  <p>Every business also keeps its own portable API that works with any agent
+  on any platform: <code>{{ base }}/a/&lt;business_id&gt;/mcp</code>,
+  <code>{{ base }}/a/&lt;business_id&gt;/openapi.json</code>,
+  <code>{{ base }}/a/&lt;business_id&gt;/actions/&lt;action&gt;</code>.</p>
+
+  <h2>4. Auth</h2>
+  <p>Read endpoints need no key. There is no API-key scheme: the
+  <code>business_id</code> (12 unguessable hex characters) is the capability
+  identifier, and every mutating operation is gated by single-use tokens
+  described below. Never ask a user to paste a secret into chat; there is
+  nothing to paste.</p>
+
+  <h2>5. Tool catalog (connector MCP)</h2>
+  <table class="checks-table">
+    <tr><th>Tool</th><th>What it does</th><th>Gated?</th></tr>
+    {% for t in tools %}
+    <tr>
+      <td><code>{{ t.name }}</code></td>
+      <td>{{ t.description }}</td>
+      <td>{% if t.annotations %}yes{% else %}no{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  <p>Typical flow: <code>search_businesses</code> → <code>get_business</code>
+  → <code>call_action</code>. Per-business MCP servers expose that business's
+  own actions as tools instead.</p>
+
+  <h2>6. Approval flow (server-enforced)</h2>
+  <p>Actions that commit the business (bookings, orders) are approval-gated
+  <b>server-side</b> — the gate cannot be skipped by the agent:</p>
+  <ol>
+    <li>Call the action with its parameters. The server validates them and
+    returns <code>approval_required: true</code> plus a single-use
+    <code>approval_token</code> (valid 10 minutes). Nothing has executed.</li>
+    <li>Show the human the action and the exact parameters. Get a yes.</li>
+    <li>Call again with <code>approval_token</code> to execute.</li>
+  </ol>
+  <p>The token binds the business, the action, and the exact approved
+  parameters: reuse, expiry, a different business, or changed parameters are
+  all rejected. The same two-step flow works on the REST endpoints and the
+  MCP tools.</p>
+
+  <h2>7. Payments</h2>
+  <p>Unamused never touches payment credentials. When an agent needs to pay
+  (e.g. completing an order), the agent's own wallet handles checkout —
+  in Muse, that is Stripe Link with one-time virtual cards. Unamused only
+  needs to hand the agent a priced order; do not build payment handling
+  into the connector.</p>
+
+  <h2>8. Webhooks (business side)</h2>
+  <p>When an action executes through the <code>webhook</code> channel, Unamused
+  POSTs JSON <code>{action, params, idempotency_key, …}</code> to the
+  business's URL with:</p>
+  <ul>
+    <li><code>X-Unamused-Signature: t=&lt;unix-ts&gt;,v1=&lt;hex&gt;</code> —
+    HMAC-SHA256 of <code>&lt;ts&gt;.&lt;raw-body&gt;</code> keyed by the
+    business's webhook secret</li>
+    <li><code>X-Unamused-Timestamp</code> and
+    <code>X-Unamused-Idempotency-Key</code> (also inside the JSON body)</li>
+  </ul>
+  <p>Receivers should verify the signature and reject timestamps outside a
+  ±5 minute window to stop replays.</p>
+
+  <h2>9. Status polling</h2>
+  <p>Every executed action is recorded with a stable <code>log_id</code>
+  (returned by <code>call_action</code>). Poll these — never re-run an
+  action to check on it:</p>
+  <ul>
+    <li><code>GET {{ base }}/connector/businesses/&lt;business_id&gt;/status</code> — current status, per-action last-execution info</li>
+    <li><code>GET {{ base }}/connector/action-log/&lt;log_id&gt;</code> — one executed action's status (<code>delivered</code> / <code>handoff</code> / <code>error</code>)</li>
+    <li><code>GET {{ base }}/connector/changes?since=&lt;ISO-8601&gt;[&amp;business_id=…]</code> — delta poll: new businesses, executed actions, deletions</li>
+  </ul>
+  <p><b>Check no more often than every 5 minutes (300 seconds)</b> and prefer
+  <code>/changes?since=</code> delta polls over full reads. Polling burns the
+  user's usage meter; these endpoints are deliberately lightweight.</p>
+
+  <h2>10. Deletion ("forget me")</h2>
+  <p>When a user asks to delete a business's data — including "forget my
+  business" or "forget me" inside Muse:</p>
+  <ol>
+    <li>Call <code>request_deletion</code> (MCP) or
+    <code>POST {{ base }}/connector/deletion/request</code> with
+    <code>{"business_id": "…"}</code>. It returns a single-use
+    <code>deletion_token</code> (10 minutes) and exactly what will be
+    deleted. Nothing is deleted by this call.</li>
+    <li>Show the owner what will be deleted. Get a clear yes.</li>
+    <li>Call <code>confirm_deletion</code> / <code>POST {{ base }}/connector/deletion/confirm</code>
+    with the token. This permanently deletes the business record, its
+    action-log entries, and pending approval tokens, and returns a deletion
+    receipt with a <code>receipt_id</code> — keep it as proof.</li>
+  </ol>
+  <p>After deletion, the business's status endpoint reports
+  <code>status: "deleted"</code> with the receipt. Deleted demo businesses
+  re-seed on server restart (they are fictional placeholders).</p>
+
+  <h2>11. Rate limits</h2>
+  <ul>
+    <li>Reads (search, detail, status, changes, brief): 120/hour per IP — a 5-minute poll cadence never trips it.</li>
+    <li>Action calls, MCP calls, deletion requests: 10/hour per IP.</li>
+    <li>Free audits: 10/hour per IP.</li>
+  </ul>
+
+  <h2>12. Privacy summary</h2>
+  <ul>
+    <li>Stored per business: name, URL, contact email (never shown publicly),
+    action definitions, webhook secret, action-log entries (action, params,
+    status, timestamps), deletion receipts.</li>
+    <li>No user accounts, no passwords, no payment data. First-party
+    server-side counters only (visits counted on Unamused's servers); no
+    cookies, no JavaScript tracking, no third-party trackers.</li>
+    <li>Meta does not review Custom Connectors — this page and the privacy
+    posture it describes are the trust surface. Review them before
+    connecting.</li>
+    <li>Retention/deletion policy beyond the "forget me" flow above is not
+    yet formalized; the deletion endpoints are the mechanism that exists
+    today.</li>
+  </ul>
+
+  <h2>13. Machine-readable pointers</h2>
+  <ul>
+    <li>OpenAPI: <a href="/connector/openapi.json"><code>/connector/openapi.json</code></a></li>
+    <li>Manifest: <a href="/connector/manifest.json"><code>/connector/manifest.json</code></a></li>
+    <li>MCP: <code>{{ base }}/connector/mcp</code></li>
+    <li>Directory: <a href="/connector/businesses"><code>/connector/businesses</code></a></li>
+  </ul>
+</section>
+{% endblock %}
