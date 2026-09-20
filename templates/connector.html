@@ -33,7 +33,10 @@
   <ol>
     <li><code>search_businesses</code> — find the business by name.</li>
     <li><code>get_business</code> — see its actions, parameters, and which ones need human approval.</li>
-    <li><code>call_action</code> — run the action. Booking and order actions are flagged, so the agent asks you first.</li>
+    <li><code>call_action</code> — run the action. Booking and order actions are
+    <b>approval-gated server-side</b>: the first call only validates and returns a single-use
+    <code>approval_token</code> (10 minutes); the agent asks you, then calls again with the token to execute.
+    The same two-step flow works on the REST endpoints.</li>
   </ol>
   <p>Every business also keeps its own portable API
   (<code>/a/&lt;id&gt;/mcp</code>) that works with any agent, on any platform —
