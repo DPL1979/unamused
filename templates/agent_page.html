@@ -1,0 +1,82 @@
+{% extends "base.html" %}
+{% block title %}{{ record.business }} — Agent API · Unamused{% endblock %}
+{% block content %}
+<section class="wrap">
+  <p class="meta">Unamused Agent API · live</p>
+  <h1>{{ record.business }}</h1>
+  <p class="lede">AI agents can now <b>{{ record.actions|map(attribute='title')|join(', ')|lower }}</b>.
+  Point any MCP-capable agent (Muse, Claude, ChatGPT) at the endpoints below,
+  or submit the manifest to Meta's Muse connector directory.</p>
+
+  <h2>Endpoints</h2>
+  <div class="kit-file">
+    <div class="kit-file-head"><code>MCP server (agents connect here)</code>
+      <button class="copy-btn" onclick="copyFile(this, 'mcp-url')">Copy</button></div>
+    <pre id="mcp-url">{{ base }}/a/{{ aid }}/mcp</pre>
+  </div>
+  <div class="kit-file">
+    <div class="kit-file-head"><code>OpenAPI 3.1 spec</code>
+      <button class="copy-btn" onclick="copyFile(this, 'oa-url')">Copy</button></div>
+    <pre id="oa-url">{{ base }}/a/{{ aid }}/openapi.json</pre>
+  </div>
+  <div class="kit-file">
+    <div class="kit-file-head"><code>Connector manifest</code>
+      <button class="copy-btn" onclick="copyFile(this, 'mf-url')">Copy</button></div>
+    <pre id="mf-url">{{ base }}/a/{{ aid }}/manifest.json</pre>
+  </div>
+
+  <h2>Your actions</h2>
+  <table class="checks-table">
+    <tr><th>Action</th><th>Runs via</th><th>Approval</th></tr>
+    {% for a in record.actions %}
+    <tr><td><b>{{ a.title }}</b><br><span class="lede small"><code>{{ a.name }}</code> — {{ a.description }}</span></td>
+      <td>{{ a.channel.type }}</td>
+      <td>{% if a.requires_approval %}<span class="pill warn">required</span>{% else %}<span class="pill pass">no</span>{% endif %}</td></tr>
+    {% endfor %}
+  </table>
+
+  <h2>Try it</h2>
+  <p class="lede small">Call an action right from your terminal:</p>
+  <div class="kit-file">
+    <div class="kit-file-head"><code>curl example</code>
+      <button class="copy-btn" onclick="copyFile(this, 'curl-ex')">Copy</button></div>
+    <pre id="curl-ex">curl -X POST {{ base }}/a/{{ aid }}/actions/{{ record.actions[0].name }} \
+  -H 'Content-Type: application/json' \
+  -d '{"{{ record.actions[0].params[0].name }}": "Jane Doe"}'</pre>
+  </div>
+
+  <h2>OpenAPI spec</h2>
+  <div class="kit-file">
+    <div class="kit-file-head"><code>openapi.json</code>
+      <button class="copy-btn" onclick="copyFile(this, 'oa-spec')">Copy</button></div>
+    <pre id="oa-spec">{{ openapi }}</pre>
+  </div>
+
+  <div class="lead-strip">
+    <p><b>Next:</b> submit <code>{{ base }}/a/{{ aid }}/manifest.json</code> to Meta's
+    Muse connector directory so customers reach you just by asking their agent.
+    Methodology and source: <a href="https://github.com/DPL1979/unamused">GitHub</a>.</p>
+  </div>
+</section>
+<script>
+function copyFile(btn, id) {
+  var t = document.getElementById(id).innerText;
+  function done() {
+    btn.textContent = 'Copied ✓';
+    setTimeout(function(){ btn.textContent = 'Copy'; }, 1600);
+  }
+  function fallback() {
+    var ta = document.createElement('textarea');
+    ta.value = t;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); done(); }
+    catch (e) { btn.textContent = 'Copy failed'; }
+    document.body.removeChild(ta);
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(t).then(done, fallback);
+  } else { fallback(); }
+}
+</script>
+{% endblock %}
