@@ -128,3 +128,14 @@ a{color:var(--accent)}
 .kit-guide .guide-body{padding:0 16px 16px;font-size:15px}
 .kit-guide .guide-body h3,.kit-guide .guide-body h4{margin:16px 0 8px}
 .kit-actions{display:flex;gap:12px;flex-wrap:wrap;margin:24px 0}
+
+/* Agent API builder */
+#builder input[type=text],#builder input[type=email],#builder input:not([type]),
+#builder textarea,#builder select{font-size:15px;padding:10px 12px;border:1px solid var(--line);
+  border-radius:10px;background:#fff;color:#1c1a17;max-width:100%}
+#builder textarea{font-family:inherit}
+.action-block{margin:20px 0}
+.param-row{display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin:8px 0}
+.param-row input:first-child{width:150px}
+.param-row input[placeholder="what is this for?"]{flex:1;min-width:180px}
+.rm-param{background:none;border:none;font-size:16px;cursor:pointer;color:var(--bad)}
