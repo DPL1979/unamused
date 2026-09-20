@@ -193,7 +193,7 @@ def main():
     check("mcp tools/call",
           not r["result"]["isError"] and "Jane" in r["result"]["content"][0]["text"],
           str(r["result"])[:200])
-    r = agentapi.mcp_handle(rec, {"jsonrpc": "2.0", "id": 4, "method": "nope"})
+    r = agentapi.mcp_handle(rec, {"jsonrpc": "2.0", "id": 5, "method": "nope"})
     check("mcp unknown method", r["error"]["code"] == -32601)
     check("mcp notification -> None",
           agentapi.mcp_handle(rec, {"jsonrpc": "2.0",
@@ -245,13 +245,40 @@ def main():
                      "params": {"name": "book_table",
                                "arguments": {"name": "Jane", "party_size": 4}}})
     body = r.get_json()
-    check("agent mcp tools/call",
+    first = json.loads(body["result"]["content"][0]["text"])
+    check("agent mcp gated -> approval_required",
+          r.status_code == 200 and first.get("approval_required") is True
+          and first.get("approval_token"), str(body)[:160])
+    mcp_token = first["approval_token"]
+    r = c.post("/a/%s/mcp" % aid,
+               json={"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                     "params": {"name": "book_table",
+                               "arguments": {"approval_token": mcp_token,
+                                             "name": "Jane", "party_size": 4}}})
+    body = r.get_json()
+    check("agent mcp confirm executes",
           r.status_code == 200 and not body["result"]["isError"] and
           "book.example.com" in body["result"]["content"][0]["text"],
           str(body)[:200])
+    r = c.post("/a/%s/mcp" % aid,
+               json={"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                     "params": {"name": "book_table",
+                               "arguments": {"approval_token": mcp_token,
+                                             "name": "Jane"}}})
+    body = r.get_json()
+    check("agent mcp token single-use",
+          body["result"]["isError"] and
+          "approval token" in body["result"]["content"][0]["text"].lower(),
+          str(body)[:160])
 
     r = c.post("/a/%s/actions/book_table" % aid, json={"name": "Jane"})
-    check("agent rest action",
+    first = r.get_json()
+    check("agent rest action gated -> approval_required",
+          r.status_code == 200 and first.get("approval_required") is True
+          and first.get("approval_token"), str(r.status_code))
+    r = c.post("/a/%s/actions/book_table" % aid,
+               json={"approval_token": first["approval_token"]})
+    check("agent rest action confirm executes",
           r.status_code == 200 and "handoff_url" in r.get_json(), str(r.status_code))
 
     r = c.post("/a/%s/actions/book_table" % aid, json={})
@@ -322,16 +349,27 @@ def main():
                                      "arguments": {"business_id": aid,
                                                    "action_name": "book_table",
                                                    "params": {"name": "Jane", "party_size": 2}}}})
-    check("agg mcp call_action",
+    first = json.loads(r["result"]["content"][0]["text"])
+    check("agg mcp gated -> approval_required",
+          first.get("approval_required") is True and first.get("approval_token"),
+          str(r["result"])[:160])
+    r = agentapi.aggregator_mcp_handle(
+        webapp.DATA_DIR, {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+                          "params": {"name": "call_action",
+                                     "arguments": {"business_id": aid,
+                                                   "action_name": "book_table",
+                                                   "approval_token": first["approval_token"],
+                                                   "params": {"name": "Jane", "party_size": 2}}}})
+    check("agg mcp confirm executes",
           not r["result"].get("isError") and "book.example.com" in r["result"]["content"][0]["text"],
           str(r["result"])[:200])
     r = agentapi.aggregator_mcp_handle(
-        webapp.DATA_DIR, {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+        webapp.DATA_DIR, {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
                           "params": {"name": "get_business",
                                      "arguments": {"business_id": "0123456789ab"}}})
     check("agg mcp unknown business isError", r["result"].get("isError") is True)
     r = agentapi.aggregator_mcp_handle(
-        webapp.DATA_DIR, {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+        webapp.DATA_DIR, {"jsonrpc": "2.0", "id": 8, "method": "tools/call",
                           "params": {"name": "nope", "arguments": {}}})
     check("agg mcp unknown tool", r["error"]["code"] == -32601)
 
@@ -385,17 +423,194 @@ def main():
                                              "action_name": "book_table",
                                              "params": {"name": "Jane"}}}})
     body = r.get_json()
-    check("connector mcp call_action",
+    first = json.loads(body["result"]["content"][0]["text"])
+    check("connector mcp gated -> approval_required",
+          r.status_code == 200 and first.get("approval_required") is True
+          and first.get("approval_token"), str(body)[:160])
+    r = c.post("/connector/mcp",
+               json={"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                     "params": {"name": "call_action",
+                               "arguments": {"business_id": aid,
+                                             "action_name": "book_table",
+                                             "approval_token": first["approval_token"],
+                                             "params": {"name": "Jane"}}}})
+    body = r.get_json()
+    check("connector mcp confirm executes",
           r.status_code == 200 and not body["result"]["isError"] and
           "book.example.com" in body["result"]["content"][0]["text"],
           str(body)[:200])
     r = c.post("/connector/actions/%s/book_table" % aid, json={"name": "Jane"})
-    check("connector rest action",
+    first = r.get_json()
+    check("connector rest gated -> approval_required",
+          r.status_code == 200 and first.get("approval_required") is True
+          and first.get("approval_token"), str(r.status_code))
+    r = c.post("/connector/actions/%s/book_table" % aid,
+               json={"approval_token": first["approval_token"]})
+    check("connector rest confirm executes",
           r.status_code == 200 and "handoff_url" in r.get_json(), str(r.status_code))
     r = c.post("/connector/actions/%s/book_table" % aid, json={})
     check("connector rest action missing param", r.status_code == 400, str(r.status_code))
     r = c.post("/connector/actions/0123456789ab/book_table", json={"name": "Jane"})
     check("connector rest action unknown business", r.status_code == 404, str(r.status_code))
+
+    # ---- Server-enforced approval: edge cases ----
+    ok, res = agentapi.confirm_approval(webapp.DATA_DIR, "nope-not-a-token", aid)
+    check("unknown approval token rejected",
+          not ok and "unknown" in res.get("error", ""), str(res))
+
+    ok, prep = agentapi.prepare_approval(webapp.DATA_DIR, rec2, "book_table",
+                                         {"name": "Zed"})
+    tok = prep["approval_token"]
+    ppath = os.path.join(webapp.DATA_DIR, "approval-%s.json" % tok)
+    with open(ppath) as f:
+        pend = json.load(f)
+    pend["expires_at"] = 1  # long ago
+    with open(ppath, "w") as f:
+        json.dump(pend, f)
+    ok, res = agentapi.confirm_approval(webapp.DATA_DIR, tok, aid)
+    check("expired approval token rejected",
+          not ok and "expired" in res.get("error", ""), str(res))
+
+    ok, prep2 = agentapi.prepare_approval(webapp.DATA_DIR, rec2, "book_table",
+                                          {"name": "Zed"})
+    ok, res = agentapi.confirm_approval(webapp.DATA_DIR, prep2["approval_token"],
+                                        "0123456789ab")
+    check("approval token bound to business",
+          not ok and "match" in res.get("error", ""), str(res))
+
+    ok, prep3 = agentapi.prepare_approval(webapp.DATA_DIR, rec2, "book_table",
+                                          {"name": "Jane"})
+    ok, res = agentapi.request_action(webapp.DATA_DIR, rec2, "book_table",
+                                      {"name": "Mallory"},
+                                      approval_token=prep3["approval_token"])
+    check("confirm uses approved params, ignores caller params",
+          ok and "Jane" in res.get("handoff_url", "")
+          and "Mallory" not in res.get("handoff_url", ""), str(res))
+
+    nogate = json.loads(json.dumps(good))
+    nogate["requires_approval"] = False
+    recng = {"id": "t2", "business": "Test Biz", "actions": [nogate]}
+    ok, res = agentapi.request_action(webapp.DATA_DIR, recng, "book_visit",
+                                      {"name": "Jane"})
+    check("non-gated action executes immediately",
+          ok and res.get("handoff_url", "").endswith("name=Jane"), str(res))
+
+    # ---- Webhook signing ----
+    wh_action = {"name": "ping_hook", "title": "Ping", "description": "Ping.",
+                 "params": [{"name": "msg", "type": "string", "required": False,
+                              "description": ""}],
+                 "channel": {"type": "webhook", "url": "https://example.com/hook"},
+                 "requires_approval": False}
+    wh_rec = agentapi.build_record("Hook Biz", "https://example.com", [wh_action])
+    check("build_record creates webhook_secret",
+          bool(wh_rec.get("webhook_secret")) and len(wh_rec["webhook_secret"]) >= 32)
+    wh_path = os.path.join(webapp.DATA_DIR, "agentapi-%s.json" % wh_rec["id"])
+    with open(wh_path, "w") as f:
+        json.dump(wh_rec, f)
+    captured = {}
+    real_opener = urlreq.build_opener
+    real_is_public = agentapi.is_public_host
+
+    class FakeResp:
+        def read(self, n=-1):
+            return b'{"ok":true}'
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    class FakeOpener:
+        def open(self, req, timeout=None):
+            captured["headers"] = {k.lower(): v for k, v in req.header_items()}
+            captured["data"] = req.data
+            return FakeResp()
+
+    urlreq.build_opener = lambda *a, **k: FakeOpener()
+    agentapi.is_public_host = lambda host: True
+    try:
+        ok, res = agentapi.execute_action(wh_rec, "ping_hook", {"msg": "hi"},
+                                          data_dir=webapp.DATA_DIR)
+    finally:
+        urlreq.build_opener = real_opener
+        agentapi.is_public_host = real_is_public
+    import hmac as hmac_mod
+    import hashlib as hashlib_mod
+    import time as time_mod
+    sig = captured["headers"].get("x-unamused-signature", "")
+    ts = captured["headers"].get("x-unamused-timestamp", "")
+    idem_h = captured["headers"].get("x-unamused-idempotency-key", "")
+    expect = hmac_mod.new(wh_rec["webhook_secret"].encode(),
+                          ts.encode() + b"." + captured["data"],
+                          hashlib_mod.sha256).hexdigest()
+    check("webhook signature valid",
+          ok and sig == "t=%s,v1=%s" % (ts, expect), sig[:48])
+    check("webhook timestamp fresh",
+          ts.isdigit() and abs(time_mod.time() - int(ts)) < 120, ts)
+    check("webhook idempotency key in header + body",
+          bool(idem_h) and json.loads(captured["data"])["idempotency_key"] == idem_h)
+    check("webhook result marked signed", res.get("signed") is True)
+
+    nosecret = {"id": agentapi.new_api_id(), "business": "Old Biz",
+                "actions": [wh_action], "created_at": "x", "version": 1}
+    nspath = os.path.join(webapp.DATA_DIR, "agentapi-%s.json" % nosecret["id"])
+    with open(nspath, "w") as f:
+        json.dump(nosecret, f)
+    urlreq.build_opener = lambda *a, **k: FakeOpener()
+    agentapi.is_public_host = lambda host: True
+    try:
+        agentapi.execute_action(nosecret, "ping_hook", {},
+                                data_dir=webapp.DATA_DIR)
+    finally:
+        urlreq.build_opener = real_opener
+        agentapi.is_public_host = real_is_public
+    with open(nspath) as f:
+        backfilled = json.load(f)
+    check("webhook_secret backfilled for old records",
+          bool(backfilled.get("webhook_secret")))
+
+    # ---- Seed demos ----
+    agentapi.ensure_seed_data(webapp.DATA_DIR)
+    demos = [s for s in agentapi.list_records(webapp.DATA_DIR) if s.get("demo")]
+    check("3 seed demos present", len(demos) == 3, str(len(demos)))
+    check("seed demos flagged demo",
+          all(d.get("demo") is True for d in demos) and
+          all("(demo)" in d.get("business", "") for d in demos))
+    n_before = len([f for f in os.listdir(webapp.DATA_DIR)
+                    if f.startswith("agentapi-")])
+    agentapi.ensure_seed_data(webapp.DATA_DIR)
+    n_after = len([f for f in os.listdir(webapp.DATA_DIR)
+                   if f.startswith("agentapi-")])
+    check("seed idempotent", n_before == n_after,
+          "%d -> %d" % (n_before, n_after))
+    check("seed searchable",
+          any(s["business_id"] == "deadbeef0001"
+              for s in agentapi.search_records(webapp.DATA_DIR, "dental")))
+    r = c.get("/connector/businesses")
+    check("connector lists seed demos",
+          r.status_code == 200 and
+          sum(1 for b in r.get_json()["businesses"] if b.get("demo")) == 3)
+    r = c.post("/connector/actions/deadbeef0001/request_quote",
+               json={"name": "Test", "treatment": "cleaning"})
+    check("demo link action executes",
+          r.status_code == 200 and
+          "example.com/sunny-smiles/quote" in r.get_json().get("handoff_url", ""),
+          str(r.status_code))
+    r = c.post("/connector/actions/deadbeef0001/book_appointment",
+               json={"name": "Test", "phone_or_email": "x@y.z"})
+    check("demo gated action needs approval (no network)",
+          r.status_code == 200 and r.get_json().get("approval_required") is True,
+          str(r.status_code))
+
+    # ---- Badge embed page ----
+    r = c.get("/badge")
+    check("badge page 200",
+          r.status_code == 200 and b"badge.svg" in r.data, str(r.status_code))
+    check("badge page has copy snippet",
+          b"embed snippet" in r.data and b"copy-btn" in r.data)
+    r = c.get("/")
+    check("footer links badge page", b'href="/badge"' in r.data)
 
     print("\n%d failures" % len(fails))
     sys.exit(1 if fails else 0)
