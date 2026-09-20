@@ -44,6 +44,13 @@
   -H 'Content-Type: application/json' \
   -d '{"{{ record.actions[0].params[0].name }}": "Jane Doe"}'</pre>
   </div>
+  <p class="fine">Actions marked <b>approval required</b> are gated server-side: the first call
+  validates your parameters and returns <code>approval_required</code> plus a single-use
+  <code>approval_token</code> (valid 10 minutes). Call again with
+  <code>{"approval_token": "..."}</code> after the human approves to execute.
+  Webhook deliveries are signed — verify <code>X-Unamused-Signature</code> (HMAC-SHA256 of
+  <code>&lt;timestamp&gt;.&lt;body&gt;</code>) and reject old <code>X-Unamused-Timestamp</code>
+  values to stop replays.</p>
 
   <h2>OpenAPI spec</h2>
   <div class="kit-file">
