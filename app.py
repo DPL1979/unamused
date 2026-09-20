@@ -183,6 +183,11 @@ app.jinja_env.filters["md"] = md
 
 
 def api_base():
+    # Production is always https on the apex; request.host_url reports http
+    # because nginx terminates TLS before gunicorn. Local dev keeps host_url.
+    host = (request.host or "").lower()
+    if host in ("unamused.app", "www.unamused.app"):
+        return "https://unamused.app"
     return request.host_url.rstrip("/")
 
 
