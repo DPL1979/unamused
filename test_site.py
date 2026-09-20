@@ -151,7 +151,7 @@ def main():
 
     bad2, err2 = agentapi.validate_action({
         "name": "ok_name", "title": "x", "description": "x",
-        "params": [{"name": "p", "type": "string", "required": False, "description": ""}],
+        "params": [{"name": "phone", "type": "string", "required": False, "description": ""}],
         "channel": {"type": "webhook", "url": "https://localhost/hook"}})
     check("validate_action rejects private webhook", bad2 is None and err2 is not None, str(err2))
 
@@ -264,6 +264,138 @@ def main():
     bad_form["action_name"] = "Bad Name!"
     r = c.post("/a/new", data=bad_form)
     check("agent create 400 on bad action", r.status_code == 400, str(r.status_code))
+
+    # ---- Unamused Connector (aggregator) ----
+    import urllib.request as urlreq
+
+    rec2 = agentapi.load_record(webapp.DATA_DIR, aid)
+    check("load_record finds created api",
+          rec2 is not None and rec2["business"] == "Mario & Salvo's Pizzeria")
+
+    check("load_record rejects bad id", agentapi.load_record(webapp.DATA_DIR, "zzz") is None)
+
+    listed = agentapi.list_records(webapp.DATA_DIR)
+    check("list_records includes business",
+          any(s["business_id"] == aid for s in listed), str(len(listed)))
+
+    found = agentapi.search_records(webapp.DATA_DIR, "mario")
+    check("search_records matches name",
+          any(s["business_id"] == aid for s in found))
+    check("search_records empty on miss",
+          agentapi.search_records(webapp.DATA_DIR, "zzzznothing") == [])
+    check("search_records blank query lists all",
+          len(agentapi.search_records(webapp.DATA_DIR, "")) == len(listed))
+
+    det = agentapi.business_detail(rec2)
+    check("business_detail hides contact email", "contact_email" not in det)
+    check("business_detail has schemas + approval",
+          det["actions"][0]["input_schema"]["properties"].get("name") is not None
+          and det["actions"][0]["requires_approval"] is True)
+
+    r = agentapi.aggregator_mcp_handle(
+        webapp.DATA_DIR, {"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+    check("agg mcp initialize",
+          r["result"]["serverInfo"]["name"] == "unamused-connector")
+    r = agentapi.aggregator_mcp_handle(
+        webapp.DATA_DIR, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    tools = r["result"]["tools"]
+    check("agg mcp 3 tools",
+          [t["name"] for t in tools] == ["search_businesses", "get_business", "call_action"],
+          str([t["name"] for t in tools]))
+    check("agg call_action destructiveHint",
+          next(t for t in tools if t["name"] == "call_action")
+          .get("annotations", {}).get("destructiveHint") is True)
+    r = agentapi.aggregator_mcp_handle(
+        webapp.DATA_DIR, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                          "params": {"name": "search_businesses",
+                                     "arguments": {"query": "mario"}}})
+    check("agg mcp search", not r["result"].get("isError") and aid in r["result"]["content"][0]["text"])
+    r = agentapi.aggregator_mcp_handle(
+        webapp.DATA_DIR, {"jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                          "params": {"name": "get_business",
+                                     "arguments": {"business_id": aid}}})
+    check("agg mcp get_business",
+          not r["result"].get("isError") and "book_table" in r["result"]["content"][0]["text"])
+    r = agentapi.aggregator_mcp_handle(
+        webapp.DATA_DIR, {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                          "params": {"name": "call_action",
+                                     "arguments": {"business_id": aid,
+                                                   "action_name": "book_table",
+                                                   "params": {"name": "Jane", "party_size": 2}}}})
+    check("agg mcp call_action",
+          not r["result"].get("isError") and "book.example.com" in r["result"]["content"][0]["text"],
+          str(r["result"])[:200])
+    r = agentapi.aggregator_mcp_handle(
+        webapp.DATA_DIR, {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
+                          "params": {"name": "get_business",
+                                     "arguments": {"business_id": "0123456789ab"}}})
+    check("agg mcp unknown business isError", r["result"].get("isError") is True)
+    r = agentapi.aggregator_mcp_handle(
+        webapp.DATA_DIR, {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+                          "params": {"name": "nope", "arguments": {}}})
+    check("agg mcp unknown tool", r["error"]["code"] == -32601)
+
+    spec = agentapi.aggregator_openapi_spec("https://unamused.app")
+    check("agg openapi paths",
+          "/connector/businesses" in spec["paths"] and
+          "/connector/actions/{business_id}/{action}" in spec["paths"])
+    man = agentapi.aggregator_manifest("https://unamused.app")
+    check("agg manifest endpoints",
+          man["mcp_url"].endswith("/connector/mcp") and
+          man["openapi_url"].endswith("/connector/openapi.json") and
+          man["name"] == "Unamused")
+
+    # redirect guard: hostile 302 to a private host must be blocked
+    h = agentapi._PublicRedirectHandler()
+    try:
+        h.redirect_request(urlreq.Request("https://example.com/"), None,
+                           302, "Found", {}, "http://localhost/evil")
+        redir_blocked = False
+    except Exception:
+        redir_blocked = True
+    check("redirect to private host blocked", redir_blocked)
+
+    r = c.get("/connector")
+    check("connector page 200",
+          r.status_code == 200 and b"/connector/mcp" in r.data, str(r.status_code))
+    r = c.get("/connector/openapi.json")
+    check("connector openapi 200", r.status_code == 200 and r.is_json, str(r.status_code))
+    r = c.get("/connector/manifest.json")
+    mj = r.get_json()
+    check("connector manifest 200",
+          r.status_code == 200 and mj["mcp_url"].endswith("/connector/mcp"))
+    r = c.get("/connector/businesses?q=mario")
+    check("connector search route",
+          r.status_code == 200 and any(b["business_id"] == aid for b in r.get_json()["businesses"]),
+          str(r.status_code))
+    r = c.get("/connector/businesses/" + aid)
+    check("connector business route",
+          r.status_code == 200 and r.get_json()["business_id"] == aid, str(r.status_code))
+    r = c.get("/connector/businesses/0123456789ab")
+    check("connector business 404", r.status_code == 404, str(r.status_code))
+    r = c.post("/connector/mcp",
+               json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    check("connector mcp tools/list",
+          r.status_code == 200 and len(r.get_json()["result"]["tools"]) == 3,
+          str(r.status_code))
+    r = c.post("/connector/mcp",
+               json={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                     "params": {"name": "call_action",
+                               "arguments": {"business_id": aid,
+                                             "action_name": "book_table",
+                                             "params": {"name": "Jane"}}}})
+    body = r.get_json()
+    check("connector mcp call_action",
+          r.status_code == 200 and not body["result"]["isError"] and
+          "book.example.com" in body["result"]["content"][0]["text"],
+          str(body)[:200])
+    r = c.post("/connector/actions/%s/book_table" % aid, json={"name": "Jane"})
+    check("connector rest action",
+          r.status_code == 200 and "handoff_url" in r.get_json(), str(r.status_code))
+    r = c.post("/connector/actions/%s/book_table" % aid, json={})
+    check("connector rest action missing param", r.status_code == 400, str(r.status_code))
+    r = c.post("/connector/actions/0123456789ab/book_table", json={"name": "Jane"})
+    check("connector rest action unknown business", r.status_code == 404, str(r.status_code))
 
     print("\n%d failures" % len(fails))
     sys.exit(1 if fails else 0)
