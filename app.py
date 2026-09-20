@@ -15,7 +15,7 @@ import urllib.parse
 import uuid
 from datetime import datetime, timezone
 
-from flask import Flask, request, render_template, redirect, url_for, abort, send_file
+from flask import Flask, request, render_template, redirect, url_for, abort, send_file, Response
 
 import audit as engine
 import fixkit as fixkit_gen
@@ -200,6 +200,41 @@ def kit(rid):
 @app.route("/healthz")
 def healthz():
     return "ok", 200
+
+
+@app.route("/health")
+def health():
+    return "ok", 200
+
+
+@app.route("/robots.txt")
+def robots():
+    return Response("User-agent: *\nAllow: /\n", mimetype="text/plain")
+
+
+@app.route("/sitemap.xml")
+def sitemap():
+    xml = ('<?xml version="1.0" encoding="UTF-8"?>\n'
+           '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+           '  <url><loc>https://unamused.app/</loc></url>\n'
+           '</urlset>\n')
+    return Response(xml, mimetype="application/xml")
+
+
+@app.route("/llms.txt")
+def llms_txt():
+    body = ("# Unamused\n"
+            "> Free audit: how ready a business website is for AI agents to read, "
+            "recommend, and transact with it. Independent project, not affiliated with Meta.\n"
+            "\n"
+            "## Key pages\n"
+            "- Audit your site (free): https://unamused.app/\n"
+            "- Method and source code: https://github.com/DPL1979/unamused\n"
+            "\n"
+            "## What it scores\n"
+            "Action surface (booking/ordering), schema.org structured data, machine-readable "
+            "contact, semantic HTML, sitemap/robots, technical hygiene, llms.txt, Open Graph.\n")
+    return Response(body, mimetype="text/plain")
 
 
 if __name__ == "__main__":
