@@ -101,6 +101,90 @@ def client_ip():
                                request.remote_addr or "").split(",")[0].strip()
 
 
+def hit_rate(key):
+    """Record one hit against a rate-limit bucket. False when over the limit."""
+    now = time.time()
+    hits = [t for t in RATE.get(key, []) if now - t < RATE_WINDOW]
+    if len(hits) >= RATE_MAX:
+        return False
+    hits.append(now)
+    RATE[key] = hits
+    return True
+
+
+def load_report(rid):
+    """Fetch a stored audit report by id. Returns (rid, report or None)."""
+    rid = re.sub(r"[^a-z0-9]", "", (rid or "").lower())[:16]
+    rep = REPORTS.get(rid)
+    if not rep:
+        path = os.path.join(DATA_DIR, "report-%s.json" % rid)
+        if os.path.isfile(path):
+            with open(path) as f:
+                rep = json.load(f)
+            REPORTS[rid] = rep
+    return rid, rep
+
+
+def md(text):
+    """Tiny safe markdown subset for kit guides/README: #/##/### headings,
+    - lists, **bold**, `code`, paragraphs. HTML-escaped first."""
+    import html as _html
+
+    def inline(s):
+        s = _html.escape(s)
+        s = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", s)
+        s = re.sub(r"`(.+?)`", r"<code>\1</code>", s)
+        return s
+
+    out, in_list = [], False
+    for line in (text or "").split("\n"):
+        s = line.strip()
+        if s.startswith("#### "):
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            out.append("<h5>%s</h5>" % inline(s[5:]))
+        elif s.startswith("### "):
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            out.append("<h4>%s</h4>" % inline(s[4:]))
+        elif s.startswith("## "):
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            out.append("<h3>%s</h3>" % inline(s[3:]))
+        elif s.startswith("# "):
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            out.append("<h2>%s</h2>" % inline(s[2:]))
+        elif s.startswith("- "):
+            if not in_list:
+                out.append("<ul>")
+                in_list = True
+            out.append("<li>%s</li>" % inline(s[2:]))
+        elif not s:
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+        else:
+            if in_list:
+                out.append("</ul>")
+                in_list = False
+            out.append("<p>%s</p>" % inline(s))
+    if in_list:
+        out.append("</ul>")
+    return "\n".join(out)
+
+
+app.jinja_env.filters["md"] = md
+
+
+def api_base():
+    return request.host_url.rstrip("/")
+
+
 @app.route("/")
 def index():
     return render_template("index.html",
@@ -110,9 +194,7 @@ def index():
 @app.route("/audit", methods=["POST"])
 def audit_route():
     ip = client_ip()
-    now = time.time()
-    hits = [t for t in RATE.get(ip, []) if now - t < RATE_WINDOW]
-    if len(hits) >= RATE_MAX:
+    if not hit_rate(ip):
         return render_template(
             "error.html",
             message="Rate limit reached (10 audits/hour). Try again in a bit."), 429
@@ -122,8 +204,6 @@ def audit_route():
         return render_template(
             "error.html",
             message="That doesn't look like a valid public website address."), 400
-    hits.append(now)
-    RATE[ip] = hits
 
     rep = run_audit(url)
     if rep is None:
@@ -150,41 +230,41 @@ def audit_route():
 
 @app.route("/r/<rid>")
 def report(rid):
-    rid = re.sub(r"[^a-z0-9]", "", rid.lower())[:16]
-    rep = REPORTS.get(rid)
-    if not rep:
-        path = os.path.join(DATA_DIR, "report-%s.json" % rid)
-        if os.path.isfile(path):
-            with open(path) as f:
-                rep = json.load(f)
-            REPORTS[rid] = rep
+    rid, rep = load_report(rid)
     if not rep:
         abort(404)
     return render_template("report.html", r=rep, rid=rid)
 
 
+def _kit_files_or_error(rid, key_prefix):
+    """Shared loader for the zip, web page, and API kit endpoints."""
+    rid, rep = load_report(rid)
+    if not rep or rep.get("error"):
+        return None, None, (render_template(
+            "error.html", message="No audit found for that link."), 404)
+    if not hit_rate(key_prefix + client_ip()):
+        return None, None, (render_template(
+            "error.html",
+            message="Rate limit reached (10 kits/hour). Try again in a bit."), 429)
+    try:
+        files, _rep = fixkit_gen.build_kit(rep["url"])
+    except Exception:
+        return None, None, (render_template(
+            "error.html",
+            message="Kit generation failed — the site may have blocked us. Try again."), 502)
+    return rid, files, None
+
+
 @app.route("/kit/<rid>")
 def kit(rid):
     """Free Fix Kit download, generated from the stored audit report."""
-    rid = re.sub(r"[^a-z0-9]", "", rid.lower())[:16]
-    rep = REPORTS.get(rid)
-    if not rep:
-        path = os.path.join(DATA_DIR, "report-%s.json" % rid)
-        if os.path.isfile(path):
-            with open(path) as f:
-                rep = json.load(f)
-            REPORTS[rid] = rep
+    rid, rep = load_report(rid)
     if not rep or rep.get("error"):
         abort(404)
-    ip = client_ip()
-    now = time.time()
-    hits = [t for t in RATE.get("kit:" + ip, []) if now - t < RATE_WINDOW]
-    if len(hits) >= RATE_MAX:
+    if not hit_rate("kit:" + client_ip()):
         return render_template(
             "error.html",
             message="Rate limit reached (10 kits/hour). Try again in a bit."), 429
-    hits.append(now)
-    RATE["kit:" + ip] = hits
     import tempfile
     tmp = tempfile.mkdtemp(prefix="fixkit-")
     try:
@@ -195,6 +275,96 @@ def kit(rid):
             message="Kit generation failed — the site may have blocked us. Try again."), 502
     return send_file(zpath, as_attachment=True,
                      download_name=os.path.basename(zpath))
+
+
+@app.route("/k/<rid>")
+def kit_page(rid):
+    """The Fix Kit as a web page: read the files, copy with one click."""
+    rid, files, err = _kit_files_or_error(rid, "kit:")
+    if err:
+        return err
+    _rid, rep = load_report(rid)
+    copy_files = {n: c for n, c in files.items() if n != "README.md"}
+    guides = {n: c for n, c in files.items() if n.startswith("guides/")}
+    paste_files = {n: c for n, c in copy_files.items() if not n.startswith("guides/")}
+    return render_template("kit.html", rid=rid, rep=rep, readme=files.get("README.md", ""),
+                           paste_files=paste_files, guides=guides)
+
+
+@app.route("/api")
+def api_docs():
+    return render_template("api.html")
+
+
+def _api_url(path):
+    return api_base() + path
+
+
+@app.route("/api/v1/audit", methods=["POST"])
+def api_audit():
+    """Run an audit via JSON: {"url": "https://example.com"}."""
+    if not hit_rate("api:" + client_ip()):
+        return {"error": "Rate limit reached (10 audits/hour). Try again in a bit."}, 429
+    raw = ""
+    if request.is_json:
+        raw = (request.get_json(silent=True) or {}).get("url", "")
+    if not raw:
+        raw = request.form.get("url", "")
+    url = clean_url(raw)
+    if not url:
+        return {"error": "Provide a valid public website address as 'url'."}, 400
+    rep = run_audit(url)
+    if rep is None:
+        return {"error": "The audit timed out or the site didn't respond. Try again."}, 502
+    try:
+        fh = urllib.parse.urlparse(rep.get("final_url") or url).hostname or ""
+        if fh and not is_public_host(fh):
+            return {"error": "That address isn't a public website."}, 400
+    except Exception:
+        return {"error": "That address isn't a public website."}, 400
+    rid = uuid.uuid4().hex[:12]
+    REPORTS[rid] = rep
+    with open(os.path.join(DATA_DIR, "report-%s.json" % rid), "w") as f:
+        json.dump(rep, f)
+    return {
+        "url": rep.get("url"),
+        "score": rep.get("score"),
+        "grade": rep.get("grade"),
+        "checks": rep.get("checks", []),
+        "recommendations": rep.get("recommendations", []),
+        "audited_at": rep.get("audited_at"),
+        "report_url": _api_url("/r/" + rid),
+        "kit_page_url": _api_url("/k/" + rid),
+        "kit_zip_url": _api_url("/kit/" + rid),
+    }
+
+
+@app.route("/api/v1/report/<rid>")
+def api_report(rid):
+    rid, rep = load_report(rid)
+    if not rep:
+        return {"error": "No audit found for that id."}, 404
+    return {
+        "url": rep.get("url"),
+        "score": rep.get("score"),
+        "grade": rep.get("grade"),
+        "checks": rep.get("checks", []),
+        "recommendations": rep.get("recommendations", []),
+        "audited_at": rep.get("audited_at"),
+        "report_url": _api_url("/r/" + rid),
+        "kit_page_url": _api_url("/k/" + rid),
+        "kit_zip_url": _api_url("/kit/" + rid),
+    }
+
+
+@app.route("/api/v1/kit/<rid>")
+def api_kit(rid):
+    """The Fix Kit files as JSON: {"files": {"llms.txt": "...", ...}}."""
+    rid, files, err = _kit_files_or_error(rid, "kit:")
+    if err:
+        body, code = err
+        return {"error": "Kit unavailable."}, code
+    return {"files": files, "kit_zip_url": _api_url("/kit/" + rid)}
 
 
 @app.route("/healthz")
@@ -217,6 +387,7 @@ def sitemap():
     xml = ('<?xml version="1.0" encoding="UTF-8"?>\n'
            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
            '  <url><loc>https://unamused.app/</loc></url>\n'
+           '  <url><loc>https://unamused.app/api</loc></url>\n'
            '</urlset>\n')
     return Response(xml, mimetype="application/xml")
 
