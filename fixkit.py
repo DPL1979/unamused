@@ -102,6 +102,38 @@ def clean_name(title):
     return title.strip()[:80]
 
 
+def org_name_from_ld(blobs):
+    """Business name from the site's own JSON-LD Organization/LocalBusiness markup,
+    when present. More accurate than the <title> tag (which is often SEO copy)."""
+    def pick(items):
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            t = it.get("@type", "")
+            types = t if isinstance(t, list) else [t]
+            if any(x in ("Organization", "LocalBusiness", "Corporation",
+                         "Company", "Brand") for x in types):
+                n = (it.get("name") or "").strip()
+                if n:
+                    return n[:80]
+            graph = it.get("@graph")
+            if isinstance(graph, list):
+                n = pick(graph)
+                if n:
+                    return n
+        return ""
+
+    for blob in blobs:
+        try:
+            d = json.loads(blob)
+        except Exception:
+            continue
+        n = pick(d if isinstance(d, list) else [d])
+        if n:
+            return n
+    return ""
+
+
 def crawl_key_pages(base, homepage_html, parser, limit=8):
     """Same-domain nav links with the best anchor text."""
     seen, pages = set(), []
@@ -211,7 +243,9 @@ def generate(url, out_dir="."):
         pass
 
     text = page_text(page["body"])
-    name = clean_name(parser.title) or urllib.parse.urlparse(base).netloc
+    name = (org_name_from_ld(parser.ld_json)
+            or clean_name(parser.title)
+            or urllib.parse.urlparse(base).netloc)
     desc = parser.metas.get("description", "")[:300]
     tel = next((h[4:] for h, _ in parser.anchors if h.startswith("tel:")), "")
     biz_type = detect_type(text)
@@ -273,8 +307,8 @@ def generate(url, out_dir="."):
         steps.append("3. URGENT: your robots.txt blocks all crawlers — follow robots-addendum.txt first.")
     if "og-tags.html" in files:
         steps.append("4. Paste `og-tags.html` into <head> and upload a 1200x630 og-image.jpg.")
-    steps.append("%d. Reply to your Fix Kit email when done — we re-audit free, and at "
-                 "85+/100 you get the Amused badge." % (len(steps) + 1))
+    steps.append("%d. Re-run the free audit at https://unamused.app when done — at "
+                 "85+/100 you earn the Amused badge." % (len(steps) + 1))
 
     files["README.md"] = (
         "# Your Unamused Fix Kit\n\n"
@@ -286,7 +320,8 @@ def generate(url, out_dir="."):
         "\n## Install steps\n\n" + "\n".join(steps) + "\n\n"
         "## Files in this kit\n\n" +
         "".join("- `%s`\n" % f for f in sorted(files) if f != "README.md") +
-        "\n_Stuck? Reply to your order email — real human (and agent) support._\n")
+        "\n_Stuck? Everything is free and open source — open an issue at "\
+        "https://github.com/DPL1979/unamused._\n")
 
     slug = re.sub(r"[^a-z0-9]+", "-", urllib.parse.urlparse(base).netloc.lower()).strip("-")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
