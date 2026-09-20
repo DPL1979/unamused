@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end test of the Unamused site (renamed). Monkeypatches network fetch."""
 import io
+import json
 import os
 import sys
 import zipfile
@@ -128,6 +129,141 @@ def main():
 
     r = c.post("/api/v1/audit", json={"url": "not a url"})
     check("api audit 400 on bad url", r.status_code == 400, str(r.status_code))
+
+    # ---- Per-business Agent API ----
+    import agentapi
+
+    good, err = agentapi.validate_action({
+        "name": "book_visit", "title": "Book a visit",
+        "description": "Book a visit.",
+        "params": [{"name": "name", "type": "string", "required": True,
+                    "description": "Customer name"}],
+        "channel": {"type": "link",
+                    "url_template": "https://cal.example.com/x?name={name}"},
+        "requires_approval": True})
+    check("validate_action accepts link action", good is not None and err is None, str(err))
+
+    bad, err = agentapi.validate_action({
+        "name": "Bad Name!", "title": "x", "description": "x",
+        "params": [{"name": "p", "type": "string", "required": False, "description": ""}],
+        "channel": {"type": "link", "url_template": "https://x.example.com/"}})
+    check("validate_action rejects bad name", bad is None and err is not None, str(err))
+
+    bad2, err2 = agentapi.validate_action({
+        "name": "ok_name", "title": "x", "description": "x",
+        "params": [{"name": "p", "type": "string", "required": False, "description": ""}],
+        "channel": {"type": "webhook", "url": "https://localhost/hook"}})
+    check("validate_action rejects private webhook", bad2 is None and err2 is not None, str(err2))
+
+    ok, res = agentapi.execute_action(
+        {"id": "t", "business": "Test Biz", "actions": [good]},
+        "book_visit", {"name": "Jane Doe"})
+    check("link channel fills template",
+          ok and res.get("handoff_url") == "https://cal.example.com/x?name=Jane%20Doe",
+          str(res))
+
+    ok, res = agentapi.execute_action(
+        {"id": "t", "business": "Test Biz", "actions": [good]},
+        "book_visit", {})
+    check("missing required param fails", not ok and "name" in res.get("error", ""), str(res))
+
+    rec = agentapi.build_record("Test Biz", "https://example.com", [good])
+    spec = agentapi.openapi_spec(rec, "https://unamused.app")
+    check("openapi has action path",
+          "/a/%s/actions/book_visit" % rec["id"] in spec["paths"], str(list(spec["paths"])))
+    check("openapi marks approval",
+          spec["paths"]["/a/%s/actions/book_visit" % rec["id"]]["post"].get(
+              "x-unamused-requires-approval") is True)
+
+    m = agentapi.connector_manifest(rec, "https://unamused.app")
+    check("manifest has endpoints",
+          m["openapi_url"].endswith("/openapi.json") and m["mcp_url"].endswith("/mcp"))
+
+    r = agentapi.mcp_handle(rec, {"jsonrpc": "2.0", "id": 1, "method": "initialize"})
+    check("mcp initialize", r["result"]["protocolVersion"] == agentapi.MCP_VERSION)
+    r = agentapi.mcp_handle(rec, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    check("mcp tools/list",
+          len(r["result"]["tools"]) == 1 and r["result"]["tools"][0]["name"] == "book_visit",
+          str(r))
+    check("mcp approval annotation",
+          r["result"]["tools"][0].get("annotations", {}).get("destructiveHint") is True)
+    r = agentapi.mcp_handle(rec, {"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                                  "params": {"name": "book_visit",
+                                             "arguments": {"name": "Jane"}}})
+    check("mcp tools/call",
+          not r["result"]["isError"] and "Jane" in r["result"]["content"][0]["text"],
+          str(r["result"])[:200])
+    r = agentapi.mcp_handle(rec, {"jsonrpc": "2.0", "id": 4, "method": "nope"})
+    check("mcp unknown method", r["error"]["code"] == -32601)
+    check("mcp notification -> None",
+          agentapi.mcp_handle(rec, {"jsonrpc": "2.0",
+                                    "method": "notifications/initialized"}) is None)
+
+    # routes: builder -> create -> page -> spec -> manifest -> mcp -> action
+    r = c.get("/a/new/" + rid)
+    check("agent builder 200", r.status_code == 200 and b"Agent API" in r.data,
+          str(r.status_code))
+    r = c.get("/a/new/nonexistent12")
+    check("agent builder 404 on bad rid", r.status_code == 404, str(r.status_code))
+
+    form = {
+        "business": "Mario & Salvo's Pizzeria", "url": "https://example.com",
+        "action_name": "book_table", "action_title": "Book a table",
+        "action_desc": "Book a table at the pizzeria.",
+        "action_channel_0": "link", "action_link_0": "https://book.example.com/?name={name}",
+        "action_approval_0": "on",
+        "action_pname_0_0": "name", "action_ptype_0_0": "string",
+        "action_preq_0_0": "on", "action_pdesc_0_0": "Customer name",
+        "action_pname_0_1": "party_size", "action_ptype_0_1": "integer",
+        "action_pdesc_0_1": "How many people",
+    }
+    r = c.post("/a/new", data=form)
+    check("agent create redirects", r.status_code == 302, str(r.status_code))
+    aid = r.headers["Location"].rstrip("/").split("/")[-1]
+    check("agent id shape", bool(agentapi.API_ID_RE.match(aid)), aid)
+
+    r = c.get("/a/" + aid)
+    page = r.data.decode("utf-8", "replace")
+    check("agent page 200", r.status_code == 200 and "/mcp" in page, str(r.status_code))
+
+    r = c.get("/a/%s/openapi.json" % aid)
+    check("agent openapi 200", r.status_code == 200 and r.is_json, str(r.status_code))
+    check("agent openapi paths", "book_table" in json.dumps(r.get_json()))
+
+    r = c.get("/a/%s/manifest.json" % aid)
+    check("agent manifest 200", r.status_code == 200 and "mcp_url" in r.get_json(),
+          str(r.status_code))
+
+    r = c.post("/a/%s/mcp" % aid,
+               json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    check("agent mcp tools/list", r.status_code == 200 and
+          r.get_json()["result"]["tools"][0]["name"] == "book_table",
+          str(r.status_code))
+
+    r = c.post("/a/%s/mcp" % aid,
+               json={"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                     "params": {"name": "book_table",
+                               "arguments": {"name": "Jane", "party_size": 4}}})
+    body = r.get_json()
+    check("agent mcp tools/call",
+          r.status_code == 200 and not body["result"]["isError"] and
+          "book.example.com" in body["result"]["content"][0]["text"],
+          str(body)[:200])
+
+    r = c.post("/a/%s/actions/book_table" % aid, json={"name": "Jane"})
+    check("agent rest action",
+          r.status_code == 200 and "handoff_url" in r.get_json(), str(r.status_code))
+
+    r = c.post("/a/%s/actions/book_table" % aid, json={})
+    check("agent rest action missing param", r.status_code == 400, str(r.status_code))
+
+    r = c.get("/a/0123456789ab")
+    check("agent page 404 on unknown id", r.status_code == 404, str(r.status_code))
+
+    bad_form = dict(form)
+    bad_form["action_name"] = "Bad Name!"
+    r = c.post("/a/new", data=bad_form)
+    check("agent create 400 on bad action", r.status_code == 400, str(r.status_code))
 
     print("\n%d failures" % len(fails))
     sys.exit(1 if fails else 0)
