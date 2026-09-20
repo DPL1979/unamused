@@ -114,6 +114,43 @@ def hit_rate(key):
     return True
 
 
+ANALYTICS_FILE = os.path.join(DATA_DIR, "analytics.json")
+
+
+def _referer_host():
+    try:
+        return (urllib.parse.urlparse(
+            request.headers.get("Referer", "")).hostname or "")[:80]
+    except Exception:
+        return ""
+
+
+def track(event, referer=False):
+    """First-party, server-side counter. No cookies, no JavaScript, no third
+    parties — just counts in data/analytics.json, keyed by UTC day. Never
+    raises: analytics must never break a request."""
+    try:
+        day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        try:
+            with open(ANALYTICS_FILE) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            data = {}
+        key = "%s|%s" % (day, event)
+        data[key] = data.get(key, 0) + 1
+        if referer:
+            host = _referer_host()
+            if host:
+                rkey = "%s|ref|%s" % (day, host)
+                data[rkey] = data.get(rkey, 0) + 1
+        tmp = ANALYTICS_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, ANALYTICS_FILE)
+    except Exception:
+        pass
+
+
 def load_report(rid):
     """Fetch a stored audit report by id. Returns (rid, report or None)."""
     rid = re.sub(r"[^a-z0-9]", "", (rid or "").lower())[:16]
@@ -232,6 +269,7 @@ def audit_route():
     REPORTS[rid] = rep
     with open(os.path.join(DATA_DIR, "report-%s.json" % rid), "w") as f:
         json.dump(rep, f)
+    track("audit_run")
     return redirect(url_for("report", rid=rid))
 
 
@@ -240,6 +278,7 @@ def report(rid):
     rid, rep = load_report(rid)
     if not rep:
         abort(404)
+    track("report_view", referer=True)
     return render_template("report.html", r=rep, rid=rid)
 
 
@@ -280,6 +319,7 @@ def kit(rid):
         return render_template(
             "error.html",
             message="Kit generation failed — the site may have blocked us. Try again."), 502
+    track("kit_download")
     return send_file(zpath, as_attachment=True,
                      download_name=os.path.basename(zpath))
 
@@ -333,6 +373,7 @@ def api_audit():
     REPORTS[rid] = rep
     with open(os.path.join(DATA_DIR, "report-%s.json" % rid), "w") as f:
         json.dump(rep, f)
+    track("audit_run")
     return {
         "url": rep.get("url"),
         "score": rep.get("score"),
@@ -556,6 +597,7 @@ def health():
 def connector_page():
     """Human page: what the Unamused connector is, how to add it to Muse."""
     base = api_base()
+    track("connector_call")
     return render_template("connector.html", base=base,
                            businesses=agentapi.list_records(DATA_DIR))
 
@@ -573,6 +615,7 @@ def connector_manifest():
 @app.route("/connector/businesses")
 def connector_businesses():
     """Search hosted businesses: GET /connector/businesses?q=mario"""
+    track("connector_call")
     return {"businesses": agentapi.search_records(
         DATA_DIR, request.args.get("q", ""))}
 
@@ -582,6 +625,7 @@ def connector_business(business_id):
     rec = agentapi.load_record(DATA_DIR, business_id)
     if rec is None:
         return {"error": "not found"}, 404
+    track("connector_call")
     return agentapi.business_detail(rec)
 
 
@@ -598,6 +642,7 @@ def connector_mcp():
     resp = agentapi.aggregator_mcp_handle(DATA_DIR, payload)
     if resp is None:
         return "", 202  # JSON-RPC notification: no response
+    track("connector_call")
     return resp
 
 
@@ -614,13 +659,54 @@ def connector_action(business_id, action_name):
     body = request.get_json(silent=True) or {}
     ok, result = agentapi.request_action(
         DATA_DIR, rec, action_name, body, approval_token=body.get("approval_token"))
+    if ok:
+        track("connector_call")
     return result, (200 if ok else 400)
 
 
 @app.route("/badge")
 def badge_page():
     """One-click embed page for the AMUSED badge."""
+    track("badge_page")
     return render_template("badge.html", base=api_base())
+
+
+@app.route("/badge.svg")
+def badge_svg():
+    """The badge image itself. Tracked server-side (with the embedding site's
+    host from the Referer header) so we can see where the badge spreads."""
+    track("badge_hit", referer=True)
+    return send_file(os.path.join(APP_ROOT, "static", "badge.svg"),
+                     mimetype="image/svg+xml")
+
+
+@app.route("/stats")
+def stats():
+    """Public aggregate counters: the seed of the State of Agent Readiness
+    dataset. Counts only — no cookies, no personal data, nothing to identify
+    anyone."""
+    try:
+        with open(ANALYTICS_FILE) as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        data = {}
+    totals, by_day, referers = {}, {}, {}
+    for k, v in data.items():
+        parts = k.split("|")
+        if len(parts) == 3 and parts[1] == "ref":
+            referers[parts[2]] = referers.get(parts[2], 0) + v
+        elif len(parts) == 2:
+            day, ev = parts
+            totals[ev] = totals.get(ev, 0) + v
+            by_day.setdefault(day, {})[ev] = v
+    return {
+        "totals": totals,
+        "by_day": by_day,
+        "top_referers": sorted(referers.items(), key=lambda kv: kv[1],
+                               reverse=True)[:20],
+        "note": ("First-party server-side counts only. No cookies, "
+                 "no JavaScript, no third-party trackers."),
+    }
 
 
 @app.route("/robots.txt")
