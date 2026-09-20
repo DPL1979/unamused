@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block title %}Unamused Connector — one connector for every business{% endblock %}
+{% block content %}
+<section class="wrap">
+  <p class="meta">Unamused Connector · live</p>
+  <h1>One connector. Every business on Unamused.</h1>
+  <p class="lede">Instead of a separate connector per business, connect
+  <b>Unamused</b> once — then your AI agent can find any business we host
+  and book, order, request quotes, or contact them, just by asking.</p>
+
+  <h2>Add it to Muse</h2>
+  <p>Muse lets you connect any public API as a Custom connector
+  (Settings → Connectors → Custom). Point it at the MCP server below —
+  no approval or directory listing needed. When Meta opens directory
+  submissions, this same connector is what we'll submit.</p>
+  <div class="kit-file">
+    <div class="kit-file-head"><code>MCP server (connect here)</code>
+      <button class="copy-btn" onclick="copyFile(this, 'cmcp-url')">Copy</button></div>
+    <pre id="cmcp-url">{{ base }}/connector/mcp</pre>
+  </div>
+  <div class="kit-file">
+    <div class="kit-file-head"><code>OpenAPI 3.1 spec</code>
+      <button class="copy-btn" onclick="copyFile(this, 'coa-url')">Copy</button></div>
+    <pre id="coa-url">{{ base }}/connector/openapi.json</pre>
+  </div>
+  <div class="kit-file">
+    <div class="kit-file-head"><code>Connector manifest</code>
+      <button class="copy-btn" onclick="copyFile(this, 'cmf-url')">Copy</button></div>
+    <pre id="cmf-url">{{ base }}/connector/manifest.json</pre>
+  </div>
+
+  <h2>How an agent uses it</h2>
+  <ol>
+    <li><code>search_businesses</code> — find the business by name.</li>
+    <li><code>get_business</code> — see its actions, parameters, and which ones need human approval.</li>
+    <li><code>call_action</code> — run the action. Booking and order actions are flagged, so the agent asks you first.</li>
+  </ol>
+  <p>Every business also keeps its own portable API
+  (<code>/a/&lt;id&gt;/mcp</code>) that works with any agent, on any platform —
+  the connector is distribution, not lock-in.</p>
+
+  <h2>Businesses on the connector ({{ businesses|length }})</h2>
+  {% if businesses %}
+  <table class="checks-table">
+    <tr><th>Business</th><th>Actions</th><th>Approval-gated</th></tr>
+    {% for b in businesses %}
+    <tr>
+      <td><a href="/a/{{ b.business_id }}">{{ b.business }}</a></td>
+      <td>{{ b.actions|map(attribute='title')|join(', ') }}</td>
+      <td>{% if b.actions|selectattr('requires_approval')|list %}yes{% else %}no{% endif %}</td>
+    </tr>
+    {% endfor %}
+  </table>
+  {% else %}
+  <p>No businesses yet — <a href="/">run a free audit</a> and generate the first agent API.</p>
+  {% endif %}
+</section>
+<script>
+function copyFile(btn, id) {
+  var t = document.getElementById(id).innerText;
+  function done() {
+    btn.textContent = 'Copied ✓';
+    setTimeout(function(){ btn.textContent = 'Copy'; }, 1600);
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(t).then(done, function(){ btn.textContent = 'Copy failed'; });
+  } else {
+    var ta = document.createElement('textarea');
+    ta.value = t;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); done(); }
+    catch (e) { btn.textContent = 'Copy failed'; }
+    document.body.removeChild(ta);
+  }
+}
+</script>
+{% endblock %}
