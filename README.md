@@ -43,7 +43,7 @@ python3 app.py          # http://127.0.0.1:8000
 CLI audit: `python3 audit.py https://example.com`
 CLI fix kit: `python3 fixkit.py https://example.com --out fixkits/`
 
-Production: `gunicorn -w 2 -b 127.0.0.1:8000 app:app` behind nginx — see
+Production: `gunicorn -w 1 --threads 4 -b 127.0.0.1:8000 app:app` behind nginx — see
 [DEPLOY.md](DEPLOY.md). Set the `GITHUB_URL` env var to wire
 up the repo link.
 
