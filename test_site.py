@@ -85,9 +85,13 @@ def main():
     check("badge says AMUSED", b"AMUSED" in r.data and b"MUSE READY" not in r.data)
 
     home = c.get("/").data.decode("utf-8", "replace")
-    paid_words = ["$299", "Concierge", "$29", "STRIPE_PAYMENT_LINK", "/fix"]
+    paid_words = ["$299", "Concierge", "$29", "STRIPE_PAYMENT_LINK", "/fix",
+                  "order email", "Fix Kit email", "your order"]
     check("no paid-tier remnants", not any(w in home for w in paid_words),
           str([w for w in paid_words if w in home]))
+    check("kit no paid-tier remnants",
+          not any(w in kit_all for w in paid_words),
+          str([w for w in paid_words if w in kit_all]))
 
     print("\n%d failures" % len(fails))
     sys.exit(1 if fails else 0)
