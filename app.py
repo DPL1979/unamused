@@ -536,6 +536,75 @@ def health():
     return "ok", 200
 
 
+# ---- Unamused Connector: one aggregator for every hosted business API ----
+#
+# Per-business APIs (/a/<id>/...) are portable to any agent. The connector
+# is the single Muse directory listing: one review, one integration,
+# fronting every business. A user connects Unamused once, then reaches
+# any business conversationally.
+
+@app.route("/connector")
+def connector_page():
+    """Human page: what the Unamused connector is, how to add it to Muse."""
+    base = api_base()
+    return render_template("connector.html", base=base,
+                           businesses=agentapi.list_records(DATA_DIR))
+
+
+@app.route("/connector/openapi.json")
+def connector_openapi():
+    return agentapi.aggregator_openapi_spec(api_base())
+
+
+@app.route("/connector/manifest.json")
+def connector_manifest():
+    return agentapi.aggregator_manifest(api_base())
+
+
+@app.route("/connector/businesses")
+def connector_businesses():
+    """Search hosted businesses: GET /connector/businesses?q=mario"""
+    return {"businesses": agentapi.search_records(
+        DATA_DIR, request.args.get("q", ""))}
+
+
+@app.route("/connector/businesses/<business_id>")
+def connector_business(business_id):
+    rec = agentapi.load_record(DATA_DIR, business_id)
+    if rec is None:
+        return {"error": "not found"}, 404
+    return agentapi.business_detail(rec)
+
+
+@app.route("/connector/mcp", methods=["POST"])
+def connector_mcp():
+    """Unified MCP server: search_businesses / get_business / call_action."""
+    if not hit_rate("connector:" + request.remote_addr):
+        return {"jsonrpc": "2.0", "id": None,
+                "error": {"code": -32000, "message": "rate limited"}}, 429
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return {"jsonrpc": "2.0", "id": None,
+                "error": {"code": -32700, "message": "parse error"}}, 400
+    resp = agentapi.aggregator_mcp_handle(DATA_DIR, payload)
+    if resp is None:
+        return "", 202  # JSON-RPC notification: no response
+    return resp
+
+
+@app.route("/connector/actions/<business_id>/<action_name>", methods=["POST"])
+def connector_action(business_id, action_name):
+    """Direct REST execution of one business's action via the connector."""
+    rec = agentapi.load_record(DATA_DIR, business_id)
+    if rec is None:
+        return {"error": "not found"}, 404
+    if not hit_rate("connector:" + request.remote_addr):
+        return {"error": "Rate limited — try again later."}, 429
+    ok, result = agentapi.execute_action(
+        rec, action_name, request.get_json(silent=True) or {})
+    return result, (200 if ok else 400)
+
+
 @app.route("/robots.txt")
 def robots():
     return Response("User-agent: *\nAllow: /\n", mimetype="text/plain")
