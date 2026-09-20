@@ -216,25 +216,7 @@ def _approval_path(data_dir, token):
 
 def _purge_expired_approvals(data_dir):
     """Best-effort cleanup of stale approval token files."""
-    try:
-        names = os.listdir(data_dir)
-    except Exception:
-        return
-    now = time.time()
-    for fn in names:
-        if not (fn.startswith("approval-") and fn.endswith(".json")):
-            continue
-        p = os.path.join(data_dir, fn)
-        try:
-            with open(p) as f:
-                exp = json.load(f).get("expires_at", 0)
-            if exp < now:
-                os.remove(p)
-        except Exception:
-            try:
-                os.remove(p)
-            except Exception:
-                pass
+    _purge_expired_tokens(data_dir, "approval-")
 
 
 def prepare_approval(data_dir, record, action_name, params):
@@ -394,13 +376,26 @@ def execute_action(record, action_name, params, data_dir=None,
         url = chan["url_template"]
         for k, v in clean.items():
             url = url.replace("{%s}" % k, urllib.parse.quote(str(v), safe=""))
-        return True, {
+        ok, result = True, {
             "action": action_name,
             "handoff_url": url,
             "message": "Open this link to complete '%s' with %s."
                        % (action["title"], record["business"]),
         }
-    # webhook
+    else:
+        ok, result = _execute_webhook(record, action_name, action, clean,
+                                     data_dir, idempotency_key)
+    if data_dir:
+        # Every executed action gets a stable, pollable log entry.
+        result = dict(result)
+        result["log_id"] = log_action(data_dir, record, action_name,
+                                     clean, ok, result)
+    return ok, result
+def _execute_webhook(record, action_name, action, clean, data_dir,
+                   idempotency_key):
+    """POST the action payload to the business's webhook URL. Returns
+    (ok, result). Separated so execute_action can log uniformly."""
+    chan = action["channel"]
     secret = record.get("webhook_secret")
     if not secret and data_dir:
         # backfill for records created before signing existed
@@ -477,6 +472,46 @@ def openapi_spec(record, base_url):
                                   "again with {\"approval_token\": \"...\"} "
                                   "after the human approves to execute.")
         paths["/a/%s/actions/%s" % (record["id"], a["name"])] = {"post": op}
+    rid = record["id"]
+    paths["/a/%s/status" % rid] = {"get": {
+        "summary": "Pollable status for this business",
+        "operationId": "get_business_status",
+        "description": ("Lightweight status: current status, per-action "
+                        "last-execution info. Poll no more often than every "
+                        "5 minutes."),
+        "responses": {"200": {"description": "Business status"}},
+    }}
+    paths["/a/%s/changes" % rid] = {"get": {
+        "summary": "Delta poll for this business",
+        "operationId": "get_changes",
+        "description": ("Changes after 'since' (ISO-8601): executed actions, "
+                        "deletion. Poll no more often than every 5 minutes."),
+        "parameters": [{"name": "since", "in": "query", "required": True,
+                        "schema": {"type": "string"}}],
+        "responses": {"200": {"description": "Change list"}},
+    }}
+    paths["/a/%s/deletion/request" % rid] = {"post": {
+        "summary": "Start deleting this business's data",
+        "operationId": "request_deletion",
+        "description": ("'Forget me', step 1: returns a single-use "
+                        "deletion_token (10 min) plus what will be deleted. "
+                        "Nothing is deleted by this call."),
+        "x-unamused-requires-approval": True,
+        "responses": {"200": {"description": "Deletion token"}},
+    }}
+    paths["/a/%s/deletion/confirm" % rid] = {"post": {
+        "summary": "Confirm deletion",
+        "operationId": "confirm_deletion",
+        "description": ("Step 2: permanently deletes the business record, "
+                        "action-log entries, and pending approval tokens; "
+                        "returns a deletion receipt. Cannot be undone."),
+        "x-unamused-requires-approval": True,
+        "requestBody": {"required": True, "content": {"application/json": {
+            "schema": {"type": "object",
+                       "properties": {"deletion_token": {"type": "string"}},
+                       "required": ["deletion_token"]}}}},
+        "responses": {"200": {"description": "Deletion receipt"}},
+    }}
     return {
         "openapi": "3.1.0",
         "info": {
@@ -747,6 +782,82 @@ AGGREGATOR_TOOLS = [
         },
         "annotations": {"destructiveHint": True},
     },
+    {
+        "name": "get_action_status",
+        "description": ("Look up one executed action by its stable log_id "
+                        "(returned as log_id by call_action). Returns the "
+                        "action's status (delivered / handoff / error), "
+                        "parameters, and timestamps. Lightweight: safe to "
+                        "poll, but no more often than every 5 minutes."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "log_id": {"type": "string",
+                           "description": "log_id from a call_action result"},
+            },
+            "required": ["log_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "get_changes",
+        "description": ("Delta poll: everything that changed after the given "
+                        "ISO-8601 timestamp — new businesses, executed "
+                        "actions, and deletions. Use this instead of "
+                        "re-reading everything; check no more often than "
+                        "every 5 minutes."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "since": {"type": "string",
+                          "description": ("ISO-8601 timestamp; only changes "
+                                         "after this are returned")},
+                "business_id": {"type": "string",
+                                "description": ("Optional: limit to one "
+                                               "business")},
+            },
+            "required": ["since"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "request_deletion",
+        "description": ("Start deleting a business's data from Unamused "
+                        "(the 'forget me' flow). Returns a single-use "
+                        "deletion_token plus exactly what will be deleted. "
+                        "Show the owner, get a clear yes, then call "
+                        "confirm_deletion with the token. Nothing is deleted "
+                        "by this call."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "business_id": {"type": "string",
+                                "description": "business_id from search_businesses"},
+            },
+            "required": ["business_id"],
+            "additionalProperties": False,
+        },
+        "annotations": {"destructiveHint": True},
+    },
+    {
+        "name": "confirm_deletion",
+        "description": ("Confirm a deletion started by request_deletion. "
+                        "Permanently deletes the business record, its "
+                        "action-log entries, and pending approval tokens, "
+                        "then returns a deletion receipt (receipt_id) as "
+                        "proof. Cannot be undone."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "deletion_token": {"type": "string",
+                                   "description": ("Token from a previous "
+                                                  "request_deletion response")},
+            },
+            "required": ["deletion_token"],
+            "additionalProperties": False,
+        },
+        "annotations": {"destructiveHint": True},
+    },
 ]
 
 
@@ -821,6 +932,41 @@ def aggregator_mcp_handle(data_dir, payload):
                              "text": _action_result_text(rec, ok, result)}],
                 "isError": not ok,
             })
+        if name == "get_action_status":
+            entry = get_log_entry(data_dir, args.get("log_id", ""))
+            if entry is None:
+                return _rpc_ok(rid, {
+                    "content": [{"type": "text",
+                                 "text": "Error: unknown log_id"}],
+                    "isError": True})
+            return _rpc_ok(rid, {"content": [{
+                "type": "text", "text": json.dumps(entry, indent=2)}]})
+        if name == "get_changes":
+            ch = changes_since(data_dir, args.get("since", ""),
+                               args.get("business_id"))
+            if ch is None:
+                return _rpc_ok(rid, {
+                    "content": [{"type": "text",
+                                 "text": ("Error: provide 'since' as an "
+                                          "ISO-8601 timestamp")}],
+                    "isError": True})
+            return _rpc_ok(rid, {"content": [{
+                "type": "text", "text": json.dumps(ch, indent=2)}]})
+        if name == "request_deletion":
+            ok, result = request_deletion(data_dir, args.get("business_id", ""))
+            return _rpc_ok(rid, {
+                "content": [{"type": "text",
+                             "text": json.dumps(result, indent=2)}],
+                "isError": not ok,
+            })
+        if name == "confirm_deletion":
+            ok, result = confirm_deletion(data_dir,
+                                         args.get("deletion_token", ""))
+            return _rpc_ok(rid, {
+                "content": [{"type": "text",
+                             "text": json.dumps(result, indent=2)}],
+                "isError": not ok,
+            })
         return _rpc_err(rid, -32601, "unknown tool: %s" % name)
     return _rpc_err(rid, -32601, "method not found: %s" % method)
 
@@ -893,6 +1039,111 @@ def aggregator_openapi_spec(base_url):
                     "responses": {"200": {"description": "Action result"}},
                 }
             },
+            "/connector/businesses/{business_id}/status": {
+                "get": {
+                    "summary": "Pollable status for one business",
+                    "operationId": "get_business_status",
+                    "description": ("Lightweight status: stable ids, current "
+                                    "status, per-action last-execution info. "
+                                    "Poll no more often than every 5 minutes. "
+                                    "Deleted businesses return status "
+                                    "'deleted' with their receipt_id."),
+                    "parameters": [{
+                        "name": "business_id", "in": "path", "required": True,
+                        "schema": {"type": "string"},
+                    }],
+                    "responses": {"200": {"description": "Business status"}},
+                }
+            },
+            "/connector/action-log/{log_id}": {
+                "get": {
+                    "summary": "Status of one executed action",
+                    "operationId": "get_action_status",
+                    "description": ("Look up one action-log entry by its "
+                                    "stable log_id (returned by call_action). "
+                                    "Poll no more often than every 5 minutes."),
+                    "parameters": [{
+                        "name": "log_id", "in": "path", "required": True,
+                        "schema": {"type": "string"},
+                    }],
+                    "responses": {"200": {"description": "Action-log entry"}},
+                }
+            },
+            "/connector/changes": {
+                "get": {
+                    "summary": "Delta poll: changes since a timestamp",
+                    "operationId": "get_changes",
+                    "description": ("Everything that changed after 'since': "
+                                    "new businesses, executed actions, "
+                                    "deletions. Use this instead of "
+                                    "re-reading everything; poll no more "
+                                    "often than every 5 minutes."),
+                    "parameters": [
+                        {"name": "since", "in": "query", "required": True,
+                         "description": "ISO-8601 timestamp",
+                         "schema": {"type": "string"}},
+                        {"name": "business_id", "in": "query",
+                         "description": "Optional: limit to one business",
+                         "schema": {"type": "string"}},
+                    ],
+                    "responses": {"200": {"description": "Change list"}},
+                }
+            },
+            "/connector/deletion/request": {
+                "post": {
+                    "summary": "Start deleting a business's data",
+                    "operationId": "request_deletion",
+                    "description": ("The 'forget me' flow, step 1: returns a "
+                                    "single-use deletion_token (10 min) plus "
+                                    "exactly what will be deleted. Show the "
+                                    "owner, get a clear yes, then confirm. "
+                                    "Nothing is deleted by this call."),
+                    "x-unamused-requires-approval": True,
+                    "requestBody": {
+                        "required": True,
+                        "content": {"application/json": {
+                            "schema": {"type": "object",
+                                       "properties": {
+                                           "business_id": {"type": "string"}},
+                                       "required": ["business_id"]}}},
+                    },
+                    "responses": {"200": {"description": "Deletion token"}},
+                }
+            },
+            "/connector/deletion/confirm": {
+                "post": {
+                    "summary": "Confirm a deletion",
+                    "operationId": "confirm_deletion",
+                    "description": ("Step 2: permanently deletes the business "
+                                    "record, its action-log entries, and "
+                                    "pending approval tokens; returns a "
+                                    "deletion receipt (receipt_id) as proof. "
+                                    "Cannot be undone."),
+                    "x-unamused-requires-approval": True,
+                    "requestBody": {
+                        "required": True,
+                        "content": {"application/json": {
+                            "schema": {"type": "object",
+                                       "properties": {
+                                           "deletion_token": {"type": "string"}},
+                                       "required": ["deletion_token"]}}},
+                    },
+                    "responses": {"200": {"description": "Deletion receipt"}},
+                }
+            },
+            "/connector/brief": {
+                "get": {
+                    "summary": "Plain-language connector brief for agents",
+                    "operationId": "get_brief",
+                    "description": ("A login-free page written for AI agents: "
+                                    "what Unamused is, endpoints, auth, the "
+                                    "tool catalog, approval flow, webhooks, "
+                                    "polling, deletion, rate limits, privacy. "
+                                    "Start here when creating a Custom "
+                                    "Connector."),
+                    "responses": {"200": {"description": "Brief page (HTML)"}},
+                }
+            },
         },
     }
 
@@ -911,6 +1162,425 @@ def aggregator_manifest(base_url):
         "mcp_url": base + "/connector/mcp",
         "auth": {"type": "none"},
         "generated_by": "Unamused (https://unamused.app) — free, MIT",
+    }
+
+
+# ---- Action log + pollable status ----
+#
+# Agents like Meta's Muse work in the background: they poll for changes
+# instead of sitting on an open request. Polling burns the user's usage
+# meter, so these endpoints are deliberately lightweight — a record read
+# plus a scan of one append-only file, no network calls, no re-execution.
+#
+# Every executed action (REST or MCP, per-business or connector) is
+# appended to data/actionlog.jsonl with a stable log_id, a status
+# (delivered / handoff / error), and timestamps. Nothing here re-runs
+# anything; it only reports what already happened.
+#
+# Recommended poll interval: 300 seconds (5 minutes). Use the
+# "changes since" endpoint for delta polls instead of full reads.
+
+POLL_INTERVAL = 300  # seconds; documented to agents, enforced by rate limits
+
+ACTIONLOG_NAME = "actionlog.jsonl"
+DELETIONS_NAME = "deletions.jsonl"
+
+
+def _actionlog_path(data_dir):
+    return os.path.join(data_dir, ACTIONLOG_NAME)
+
+
+def _deletions_path(data_dir):
+    return os.path.join(data_dir, DELETIONS_NAME)
+
+
+def log_action(data_dir, record, action_name, params, ok, result):
+    """Append one immutable entry to the action log. Returns the log_id."""
+    action = next((a for a in record["actions"] if a["name"] == action_name),
+                  None)
+    if ok:
+        status = "delivered" if result.get("delivered") else "handoff"
+    else:
+        status = "error"
+    entry = {
+        "log_id": "log_" + secrets.token_hex(8),
+        "business_id": record["id"],
+        "business": record.get("business"),
+        "action": action_name,
+        "channel": (action["channel"]["type"] if action else ""),
+        "params": params or {},
+        "status": status,
+        "idempotency_key": result.get("idempotency_key"),
+        "result_summary": (result.get("message") or result.get("error") or "")[:200],
+        "created_at": utcnow(),
+    }
+    try:
+        with open(_actionlog_path(data_dir), "a") as f:
+            f.write(json.dumps(entry) + "\n")
+    except Exception:
+        pass
+    return entry["log_id"]
+
+
+def read_action_log(data_dir):
+    """All action-log entries, oldest first. Skips corrupt lines."""
+    out = []
+    try:
+        with open(_actionlog_path(data_dir)) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except Exception:
+                    continue
+    except OSError:
+        pass
+    return out
+
+
+def get_log_entry(data_dir, log_id):
+    """One action-log entry by its stable id. Returns entry or None."""
+    safe = re.sub(r"[^A-Za-z0-9_]", "", log_id or "")[:32]
+    if not safe:
+        return None
+    for e in read_action_log(data_dir):
+        if e.get("log_id") == safe:
+            return e
+    return None
+
+
+def read_deletions(data_dir):
+    """All deletion receipts (tombstones), oldest first."""
+    out = []
+    try:
+        with open(_deletions_path(data_dir)) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except Exception:
+                    continue
+    except OSError:
+        pass
+    return out
+
+
+def find_deletion(data_dir, business_id):
+    """The deletion receipt for a business, or None if never deleted."""
+    for d in read_deletions(data_dir):
+        if d.get("business_id") == business_id:
+            return d
+    return None
+
+
+def business_status(data_dir, business_id):
+    """Lightweight pollable status for one business: stable ids, current
+    status, per-action last-execution info. Returns None if unknown."""
+    now = utcnow()
+    rec = load_record(data_dir, business_id)
+    if rec is None:
+        tomb = find_deletion(data_dir, business_id)
+        if tomb:
+            return {
+                "business_id": business_id,
+                "status": "deleted",
+                "business": tomb.get("business"),
+                "deleted_at": tomb.get("deleted_at"),
+                "receipt_id": tomb.get("receipt_id"),
+                "checked_at": now,
+                "recommended_poll_interval_seconds": POLL_INTERVAL,
+            }
+        return None
+    entries = [e for e in read_action_log(data_dir)
+               if e.get("business_id") == business_id]
+    per_action = {}
+    for a in rec.get("actions") or []:
+        per_action[a["name"]] = {"title": a["title"], "executions": 0,
+                                "last_executed_at": None, "last_status": None}
+    for e in entries:
+        slot = per_action.get(e.get("action"))
+        if slot is None:  # action renamed or removed since execution
+            slot = per_action[e.get("action")] = {
+                "title": e.get("action"), "executions": 0,
+                "last_executed_at": None, "last_status": None}
+        slot["executions"] += 1
+        slot["last_executed_at"] = e.get("created_at")
+        slot["last_status"] = e.get("status")
+    stamps = [_parse_ts(e.get("created_at")) for e in entries]
+    stamps = [d for d in stamps if d]
+    rec_dt = _parse_ts(rec.get("created_at"))
+    if rec_dt:
+        stamps.append(rec_dt)
+    return {
+        "business_id": rec["id"],
+        "business": rec["business"],
+        "status": "active",
+        "demo": bool(rec.get("demo")),
+        "action_count": len(rec.get("actions") or []),
+        "actions": per_action,
+        "total_executions": len(entries),
+        "last_change_at": max(stamps).isoformat() if stamps else None,
+        "checked_at": now,
+        "recommended_poll_interval_seconds": POLL_INTERVAL,
+    }
+
+
+def _parse_ts(raw):
+    """Parse an ISO-8601 timestamp into an aware UTC datetime.
+    Returns None when unparsable."""
+    try:
+        s = (raw or "").strip()
+        if not s:
+            return None
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        dt = datetime.fromisoformat(s)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+    except Exception:
+        return None
+
+
+def _parse_since(raw):
+    """Parse an ISO-8601 timestamp into a normalized UTC ISO string.
+    Returns None when unparsable."""
+    dt = _parse_ts(raw)
+    return dt.isoformat() if dt else None
+
+
+def changes_since(data_dir, since_raw, business_id=None):
+    """Delta poll: everything that changed after `since_raw`
+    (business_created, action_executed, business_deleted), sorted oldest
+    first. Returns None when `since_raw` is not a valid timestamp.
+    Timestamps are compared as datetimes; entries with unparsable
+    timestamps are skipped, never trusted."""
+    since_dt = _parse_ts(since_raw)
+    if since_dt is None:
+        return None
+
+    def after(raw):
+        dt = _parse_ts(raw)
+        return dt is not None and dt > since_dt
+
+    changes = []
+    for s in list_records(data_dir):
+        if business_id and s["business_id"] != business_id:
+            continue
+        if after(s.get("created_at")):
+            changes.append({"type": "business_created", "at": s["created_at"],
+                            "business_id": s["business_id"],
+                            "business": s["business"]})
+    for e in read_action_log(data_dir):
+        if business_id and e.get("business_id") != business_id:
+            continue
+        if after(e.get("created_at")):
+            changes.append({"type": "action_executed", "at": e["created_at"],
+                            "business_id": e["business_id"],
+                            "business": e.get("business"),
+                            "action": e.get("action"),
+                            "status": e.get("status"),
+                            "log_id": e.get("log_id")})
+    for d in read_deletions(data_dir):
+        if business_id and d.get("business_id") != business_id:
+            continue
+        if after(d.get("deleted_at")):
+            changes.append({"type": "business_deleted", "at": d["deleted_at"],
+                            "business_id": d["business_id"],
+                            "business": d.get("business"),
+                            "receipt_id": d.get("receipt_id")})
+    changes.sort(key=lambda c: _parse_ts(c["at"]) or since_dt)
+    return {
+        "since": since_dt.isoformat(),
+        "until": utcnow(),
+        "business_id": business_id,
+        "change_count": len(changes),
+        "changes": changes,
+        "recommended_poll_interval_seconds": POLL_INTERVAL,
+    }
+
+
+# ---- Data deletion ("forget me") ----
+#
+# A business owner — or a user acting through their agent — can have all
+# of a business's data deleted: the business record, its action-log
+# entries, and any pending approval tokens. Two steps, mirroring the
+# action approval flow:
+#
+#   1. request_deletion(business_id) -> deletion_token (10 min, single use)
+#   2. confirm_deletion(deletion_token) -> deletes everything, returns a
+#      deletion receipt (receipt_id) as proof.
+#
+# The agent's job in a "forget me" conversation: call request, show the
+# owner exactly what will be deleted, get a clear yes, then confirm.
+# The receipt is the answer to "prove you deleted it."
+
+DELETION_TTL = 600  # deletion tokens live 10 minutes and are single-use
+
+
+def _deletion_path(data_dir, token):
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", token or "")
+    return os.path.join(data_dir, "deletion-%s.json" % safe)
+
+
+def _purge_expired_tokens(data_dir, prefix):
+    """Best-effort cleanup of stale single-use token files."""
+    try:
+        names = os.listdir(data_dir)
+    except Exception:
+        return
+    now = time.time()
+    for fn in names:
+        if not (fn.startswith(prefix) and fn.endswith(".json")):
+            continue
+        p = os.path.join(data_dir, fn)
+        try:
+            with open(p) as f:
+                exp = json.load(f).get("expires_at", 0)
+            if exp < now:
+                os.remove(p)
+        except Exception:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+
+def request_deletion(data_dir, business_id):
+    """Start a deletion: validate and mint a single-use deletion token.
+    Returns (True, result-with-token) or (False, error)."""
+    rec = load_record(data_dir, business_id)
+    if rec is None:
+        return False, {"error": "unknown business_id"}
+    _purge_expired_tokens(data_dir, "deletion-")
+    token = secrets.token_urlsafe(32)
+    pending = {
+        "business_id": business_id,
+        "business": rec.get("business"),
+        "created_at": utcnow(),
+        "expires_at": time.time() + DELETION_TTL,
+    }
+    try:
+        with open(_deletion_path(data_dir, token), "w") as f:
+            json.dump(pending, f)
+    except Exception as e:
+        return False, {"error": "could not start deletion: %s" % str(e)[:100]}
+    entries = sum(1 for e in read_action_log(data_dir)
+                  if e.get("business_id") == business_id)
+    approvals = 0
+    try:
+        for fn in os.listdir(data_dir):
+            if fn.startswith("approval-") and fn.endswith(".json"):
+                try:
+                    with open(os.path.join(data_dir, fn)) as f:
+                        if json.load(f).get("business_id") == business_id:
+                            approvals += 1
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return True, {
+        "confirmation_required": True,
+        "deletion_token": token,
+        "business_id": business_id,
+        "business": rec.get("business"),
+        "will_delete": {
+            "business_record": True,
+            "action_log_entries": entries,
+            "pending_approval_tokens": approvals,
+        },
+        "expires_in": DELETION_TTL,
+        "message": ("This will permanently delete '%s' from Unamused: its "
+                    "business record, %d action-log entries, and %d pending "
+                    "approval tokens. Show the owner exactly this, get a "
+                    "clear yes, then call deletion confirm with "
+                    "deletion_token to run it. This cannot be undone."
+                    % (rec.get("business"), entries, approvals)),
+    }
+
+
+def confirm_deletion(data_dir, token):
+    """Burn a single-use deletion token and delete everything for the
+    business. Returns (ok, result-with-receipt)."""
+    path = _deletion_path(data_dir, token)
+    try:
+        with open(path) as f:
+            pending = json.load(f)
+    except Exception:
+        return False, {"error": "unknown or expired deletion token"}
+    try:
+        os.remove(path)  # single use: burn before deleting
+    except Exception:
+        pass
+    if pending.get("expires_at", 0) < time.time():
+        return False, {"error": "deletion token expired — request deletion again"}
+    business_id = pending.get("business_id") or ""
+    business_name = pending.get("business") or ""
+    items = {"business_record": False, "action_log_entries": 0,
+             "pending_approval_tokens": 0}
+    try:
+        os.remove(os.path.join(data_dir, "agentapi-%s.json" % business_id))
+        items["business_record"] = True
+    except Exception:
+        pass
+    try:
+        for fn in os.listdir(data_dir):
+            if fn.startswith("approval-") and fn.endswith(".json"):
+                p = os.path.join(data_dir, fn)
+                try:
+                    with open(p) as f:
+                        match = json.load(f).get("business_id") == business_id
+                except Exception:
+                    match = False
+                if match:
+                    try:
+                        os.remove(p)
+                        items["pending_approval_tokens"] += 1
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    kept, removed = [], 0
+    for e in read_action_log(data_dir):
+        if e.get("business_id") == business_id:
+            removed += 1
+        else:
+            kept.append(e)
+    if removed:
+        try:
+            with open(_actionlog_path(data_dir), "w") as f:
+                for e in kept:
+                    f.write(json.dumps(e) + "\n")
+        except Exception:
+            removed = 0  # rewrite failed: don't claim deletion
+    items["action_log_entries"] = removed
+    receipt_id = "del_" + secrets.token_hex(8)
+    tomb = {
+        "receipt_id": receipt_id,
+        "business_id": business_id,
+        "business": business_name,
+        "deleted_at": utcnow(),
+        "items_deleted": items,
+    }
+    try:
+        with open(_deletions_path(data_dir), "a") as f:
+            f.write(json.dumps(tomb) + "\n")
+    except Exception:
+        pass
+    return True, {
+        "deleted": True,
+        "receipt_id": receipt_id,
+        "business_id": business_id,
+        "business": business_name,
+        "deleted_at": tomb["deleted_at"],
+        "items_deleted": items,
+        "message": ("All Unamused data for '%s' has been deleted. Keep "
+                    "receipt_id %s as proof of deletion."
+                    % (business_name, receipt_id)),
     }
 
 
