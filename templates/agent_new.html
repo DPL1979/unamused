@@ -1,0 +1,113 @@
+{% extends "base.html" %}
+{% block title %}Create your Agent API · Unamused{% endblock %}
+{% block content %}
+<section class="wrap">
+  <p class="meta">Unamused Agent API · from your {{ rep.score }}/100 audit</p>
+  <h1>Give {{ rep.url }} an API agents can call</h1>
+  <p class="lede">Define the actions customers ask your agent for — booking, quotes,
+  orders, contact. We host the API: an OpenAPI spec, an MCP server any agent can
+  use, and a connector manifest for Meta's Muse directory. Free.</p>
+
+  <form method="post" action="/a/new" id="builder">
+    <h2>1. Your business</h2>
+    <p><label>Business name<br>
+      <input name="business" value="{{ business }}" required maxlength="120" style="width:100%"></label></p>
+    <p><label>Website<br>
+      <input name="url" value="{{ rep.url }}" maxlength="500" style="width:100%"></label></p>
+    <p><label>Contact email (optional, shown to agents)<br>
+      <input name="contact_email" type="email" maxlength="120" style="width:100%"></label></p>
+
+    <h2>2. Add actions</h2>
+    <p class="lede small">Start from a template or add a custom action. Each action runs
+    through a <b>webhook</b> (we POST the details to your URL) or a <b>link</b>
+    (we hand the agent a deep link, e.g. your Calendly with fields filled in).</p>
+    <div class="kit-actions" id="tpl-btns">
+      {% for t in templates %}
+      <button type="button" class="btn secondary" data-tpl="{{ loop.index0 }}">+ {{ t.title }}</button>
+      {% endfor %}
+      <button type="button" class="btn secondary" id="custom-btn">+ Custom action</button>
+    </div>
+    <div id="actions"></div>
+
+    <h2>3. Launch</h2>
+    <p><button class="btn big" type="submit">Create my Agent API →</button></p>
+  </form>
+</section>
+
+<script>
+var TPLS = {{ templates|tojson }};
+var actionCount = 0;
+
+function esc(s){ return (s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;"); }
+
+function paramRow(i, j, p){
+  p = p || {name:"", type:"string", required:true, description:""};
+  var types = ["string","number","integer","boolean"].map(function(t){
+    return '<option value="'+t+'"'+(t===p.type?' selected':'')+'>'+t+'</option>';
+  }).join("");
+  return '<div class="param-row">'
+    + '<input name="action_pname_'+i+'_'+j+'" value="'+esc(p.name)+'" placeholder="param name" required>'
+    + '<select name="action_ptype_'+i+'_'+j+'">'+types+'</select>'
+    + '<label><input type="checkbox" name="action_preq_'+i+'_'+j+'"'+(p.required?' checked':'')+'> required</label>'
+    + '<input name="action_pdesc_'+i+'_'+j+'" value="'+esc(p.description)+'" placeholder="what is this for?">'
+    + '<button type="button" class="rm-param">✕</button>'
+    + '</div>';
+}
+
+function addAction(tpl){
+  var i = actionCount++;
+  var t = tpl || {key:"custom_action", title:"", description:"",
+                  params:[{name:"",type:"string",required:true,description:""}],
+                  requires_approval:false};
+  var div = document.createElement("div");
+  div.className = "kit-file action-block";
+  var paramsHtml = t.params.map(function(p, j){ return paramRow(i, j, p); }).join("");
+  div.innerHTML =
+      '<div class="kit-file-head"><code>Action '+(i+1)+'</code>'
+      + '<button type="button" class="copy-btn rm-action">Remove</button></div>'
+    + '<div style="padding:16px">'
+    + '<p><label>Action name (lowercase, underscores)<br>'
+    + '<input name="action_name" value="'+esc(t.key)+'" required pattern="[a-z][a-z0-9_]{1,40}" style="width:100%"></label></p>'
+    + '<p><label>Title shown to agents<br>'
+    + '<input name="action_title" value="'+esc(t.title)+'" maxlength="80" style="width:100%"></label></p>'
+    + '<p><label>Description (tell the agent exactly when to use this)<br>'
+    + '<textarea name="action_desc" rows="2" maxlength="500" style="width:100%">'+esc(t.description)+'</textarea></label></p>'
+    + '<p><label><input type="checkbox" name="action_approval_'+i+'"'+(t.requires_approval?' checked':'')+'> '
+    + '<b>Requires human approval</b> — for bookings, orders, anything that commits you</label></p>'
+    + '<p><b>How should the action run?</b><br>'
+    + '<label><input type="radio" name="action_channel_'+i+'" value="webhook" checked> Webhook — POST details to my URL</label><br>'
+    + '<input name="action_webhook_'+i+'" placeholder="https://my-site.com/api/agent-actions" style="width:100%"><br>'
+    + '<label><input type="radio" name="action_channel_'+i+'" value="link"> Link — hand the agent a deep link</label><br>'
+    + '<input name="action_link_'+i+'" placeholder="https://calendly.com/me?name={name}" style="width:100%"><br>'
+    + '<span class="lede small">In link templates, write {param_name} where each parameter goes.</span></p>'
+    + '<p><b>Parameters</b></p>'
+    + '<div class="params" data-next="'+t.params.length+'">'+paramsHtml+'</div>'
+    + '<p><button type="button" class="btn secondary add-param">+ Add parameter</button></p>'
+    + '</div>';
+  document.getElementById("actions").appendChild(div);
+}
+
+document.getElementById("tpl-btns").addEventListener("click", function(e){
+  var b = e.target.closest("button[data-tpl]");
+  if (b) addAction(TPLS[+b.getAttribute("data-tpl")]);
+});
+document.getElementById("custom-btn").addEventListener("click", function(){ addAction(null); });
+document.getElementById("actions").addEventListener("click", function(e){
+  if (e.target.classList.contains("rm-action")) e.target.closest(".action-block").remove();
+  if (e.target.classList.contains("add-param")){
+    var box = e.target.closest(".action-block").querySelector(".params");
+    var i = +e.target.closest(".action-block").querySelector("input[name^=action_channel_]").name.split("_").pop();
+    var j = +box.getAttribute("data-next");
+    box.insertAdjacentHTML("beforeend", paramRow(i, j, null));
+    box.setAttribute("data-next", j+1);
+  }
+  if (e.target.classList.contains("rm-param")) e.target.closest(".param-row").remove();
+});
+document.getElementById("builder").addEventListener("submit", function(e){
+  if (!document.querySelector(".action-block")){
+    e.preventDefault();
+    alert("Add at least one action first.");
+  }
+});
+</script>
+{% endblock %}
