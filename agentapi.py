@@ -20,6 +20,7 @@ manifest so the agent asks the human before calling.
 
 import ipaddress
 import json
+import os
 import re
 import socket
 import time
@@ -96,6 +97,22 @@ ACTION_TEMPLATES = [
 
 def utcnow():
     return datetime.now(timezone.utc).isoformat()
+
+
+class _PublicRedirectHandler(urllib.request.HTTPRedirectHandler):
+    """Follow webhook redirects only to public hosts (SSRF guard).
+
+    The initial webhook URL is validated before the request, but urllib
+    follows redirects by default — a hostile 302 could bounce a request
+    from a public URL to an internal one. Re-validate every hop.
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        host = urllib.parse.urlparse(newurl).hostname or ""
+        if not is_public_host(host):
+            raise urllib.error.URLError(
+                "redirect to non-public host blocked: %s" % host)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def is_public_host(host):
@@ -269,7 +286,8 @@ def execute_action(record, action_name, params):
             headers={"Content-Type": "application/json",
                      "User-Agent": "Unamused-Agent-API/1.0"},
             method="POST")
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        opener = urllib.request.build_opener(_PublicRedirectHandler())
+        with opener.open(req, timeout=15) as resp:
             body = resp.read(65536).decode("utf-8", "replace")
         return True, {
             "action": action_name,
@@ -401,3 +419,299 @@ def mcp_handle(record, payload):
             "isError": not ok,
         })
     return _rpc_err(rid, -32601, "method not found: %s" % method)
+
+
+# ---- Aggregator: the single "Unamused" connector ----
+#
+# Every business gets its own hosted API (/a/<id>/...), but Muse's
+# connector directory lists services, not ten thousand pizzerias. The
+# aggregator is the one Unamused connector: one directory listing, one
+# review, one OAuth integration — fronting every business API we host.
+# A user connects Unamused once, then reaches any business by asking:
+# "book me a table at Mario's" -> search_businesses -> get_business
+# -> call_action. The per-business endpoints remain for portability
+# (any agent, any platform, no Meta involvement needed).
+
+
+def load_record(data_dir, aid):
+    """Load one business API record by id. Returns record or None."""
+    if not API_ID_RE.match(aid or ""):
+        return None
+    path = os.path.join(data_dir, "agentapi-%s.json" % aid)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+
+def record_summary(record):
+    """Public directory entry for one business (no contact details)."""
+    return {
+        "business_id": record.get("id"),
+        "business": record.get("business"),
+        "url": record.get("url"),
+        "created_at": record.get("created_at"),
+        "action_count": len(record.get("actions") or []),
+        "actions": [
+            {"name": a["name"], "title": a["title"],
+             "requires_approval": a["requires_approval"]}
+            for a in record.get("actions") or []
+        ],
+    }
+
+
+def business_detail(record):
+    """Full public detail: actions with parameter schemas + approval flags."""
+    d = record_summary(record)
+    d["actions"] = []
+    for a in record.get("actions") or []:
+        d["actions"].append({
+            "name": a["name"],
+            "title": a["title"],
+            "description": a["description"],
+            "requires_approval": a["requires_approval"],
+            "channel": a["channel"]["type"],
+            "input_schema": input_schema(a),
+        })
+    return d
+
+
+def list_records(data_dir):
+    """All hosted business APIs, newest first. Skips unreadable files."""
+    out = []
+    try:
+        names = os.listdir(data_dir)
+    except Exception:
+        return out
+    for fn in names:
+        if not (fn.startswith("agentapi-") and fn.endswith(".json")):
+            continue
+        aid = fn[len("agentapi-"):-len(".json")]
+        rec = load_record(data_dir, aid)
+        if rec and rec.get("business"):
+            out.append(record_summary(rec))
+    out.sort(key=lambda s: s.get("created_at") or "", reverse=True)
+    return out
+
+
+def search_records(data_dir, query):
+    """Substring search over business name + URL. Empty query lists all."""
+    q = (query or "").strip().lower()
+    results = list_records(data_dir)
+    if not q:
+        return results
+    return [s for s in results
+            if q in (s.get("business") or "").lower()
+            or q in (s.get("url") or "").lower()]
+
+
+AGGREGATOR_TOOLS = [
+    {
+        "name": "search_businesses",
+        "description": ("Search businesses hosted on Unamused by name. Returns "
+                        "business_id values to pass to get_business. "
+                        "Omit the query to list every business."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string",
+                          "description": "Business name or keyword"},
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "get_business",
+        "description": ("Get a business's details and its available actions, "
+                        "with parameter schemas and per-action approval flags. "
+                        "Call this before call_action."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "business_id": {"type": "string",
+                               "description": "business_id from search_businesses"},
+            },
+            "required": ["business_id"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "call_action",
+        "description": ("Call one of a business's actions. Check get_business "
+                        "first: actions flagged requires_approval commit the "
+                        "business (booking, order) — ask the human for approval "
+                        "before calling those."),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "business_id": {"type": "string",
+                               "description": "business_id from search_businesses"},
+                "action_name": {"type": "string",
+                               "description": "action name from get_business"},
+                "params": {"type": "object",
+                           "description": "action parameters"},
+            },
+            "required": ["business_id", "action_name"],
+            "additionalProperties": False,
+        },
+        "annotations": {"destructiveHint": True},
+    },
+]
+
+
+def _action_result_text(record, ok, result):
+    """Shared human-readable text for an executed action (MCP + REST)."""
+    text = result.get("message") or ""
+    if result.get("handoff_url"):
+        text = (text + " " if text else "") + "URL: " + result["handoff_url"]
+    if result.get("delivered") and result.get("business_response"):
+        text += " Business response: " + result["business_response"][:300]
+    if not text:
+        text = json.dumps(result)
+    if not ok:
+        text = "Error: " + result.get("error", "unknown error")
+    return text
+
+
+def aggregator_mcp_handle(data_dir, payload):
+    """JSON-RPC handler for the unified Unamused connector (stateless)."""
+    if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
+        return _rpc_err(None, -32600, "invalid JSON-RPC request")
+    rid = payload.get("id")
+    method = payload.get("method", "")
+    params = payload.get("params") or {}
+
+    if method == "initialize":
+        return _rpc_ok(rid, {
+            "protocolVersion": MCP_VERSION,
+            "capabilities": {"tools": {}},
+            "serverInfo": {"name": "unamused-connector", "version": "1.0.0"},
+        })
+    if method in ("notifications/initialized", "notifications/cancelled"):
+        return None  # notification: no response
+    if method == "ping":
+        return _rpc_ok(rid, {})
+    if method == "tools/list":
+        return _rpc_ok(rid, {"tools": AGGREGATOR_TOOLS})
+    if method == "tools/call":
+        name = params.get("name", "")
+        args = params.get("arguments") or {}
+        if name == "search_businesses":
+            results = search_records(data_dir, args.get("query", ""))
+            text = (json.dumps(results)
+                    if results else "No businesses found on Unamused.")
+            return _rpc_ok(rid, {"content": [{"type": "text", "text": text}]})
+        if name == "get_business":
+            rec = load_record(data_dir, args.get("business_id", ""))
+            if rec is None:
+                return _rpc_ok(rid, {
+                    "content": [{"type": "text",
+                                 "text": "Error: unknown business_id"}],
+                    "isError": True})
+            return _rpc_ok(rid, {"content": [{
+                "type": "text", "text": json.dumps(business_detail(rec), indent=2)}]})
+        if name == "call_action":
+            rec = load_record(data_dir, args.get("business_id", ""))
+            if rec is None:
+                return _rpc_ok(rid, {
+                    "content": [{"type": "text",
+                                 "text": "Error: unknown business_id"}],
+                    "isError": True})
+            ok, result = execute_action(rec, args.get("action_name", ""),
+                                        args.get("params"))
+            return _rpc_ok(rid, {
+                "content": [{"type": "text",
+                             "text": _action_result_text(rec, ok, result)}],
+                "isError": not ok,
+            })
+        return _rpc_err(rid, -32601, "unknown tool: %s" % name)
+    return _rpc_err(rid, -32601, "method not found: %s" % method)
+
+
+def aggregator_openapi_spec(base_url):
+    """OpenAPI 3.1 for the unified connector REST surface."""
+    base = base_url.rstrip("/")
+    return {
+        "openapi": "3.1.0",
+        "info": {
+            "title": "Unamused Connector",
+            "version": "1.0.0",
+            "description": ("One connector for every business API hosted by "
+                            "Unamused. Search businesses, inspect their "
+                            "actions, and call them — from Meta's Muse, "
+                            "Claude, ChatGPT, or any agent. Free, MIT, no key. "
+                            "Approval-gated actions are marked "
+                            "x-unamused-requires-approval: ask the human "
+                            "before calling."),
+        },
+        "servers": [{"url": base}],
+        "paths": {
+            "/connector/businesses": {
+                "get": {
+                    "summary": "Search hosted businesses",
+                    "operationId": "search_businesses",
+                    "parameters": [{
+                        "name": "q", "in": "query",
+                        "description": "Business name or keyword; omit to list all",
+                        "schema": {"type": "string"},
+                    }],
+                    "responses": {"200": {"description": "Business summaries"}},
+                }
+            },
+            "/connector/businesses/{business_id}": {
+                "get": {
+                    "summary": "Business detail with action schemas",
+                    "operationId": "get_business",
+                    "parameters": [{
+                        "name": "business_id", "in": "path", "required": True,
+                        "schema": {"type": "string"},
+                    }],
+                    "responses": {"200": {"description": "Business detail"}},
+                }
+            },
+            "/connector/actions/{business_id}/{action}": {
+                "post": {
+                    "summary": "Call a business action",
+                    "description": ("Executes one action on one business. "
+                                    "Actions flagged x-unamused-requires-approval "
+                                    "commit the business (booking/order) — ask "
+                                    "the human for approval before calling."),
+                    "operationId": "call_action",
+                    "x-unamused-requires-approval": True,
+                    "parameters": [
+                        {"name": "business_id", "in": "path", "required": True,
+                         "schema": {"type": "string"}},
+                        {"name": "action", "in": "path", "required": True,
+                         "schema": {"type": "string"}},
+                    ],
+                    "requestBody": {
+                        "required": True,
+                        "content": {"application/json": {
+                            "schema": {"type": "object",
+                                       "description": "Action parameters"}}},
+                    },
+                    "responses": {"200": {"description": "Action result"}},
+                }
+            },
+        },
+    }
+
+
+def aggregator_manifest(base_url):
+    """The one manifest for the Unamused directory listing."""
+    base = base_url.rstrip("/")
+    return {
+        "name": "Unamused",
+        "description": ("Reach every business on Unamused from your AI agent: "
+                        "find the business, then book, order, request a quote, "
+                        "or contact them."),
+        "vendor": "Unamused",
+        "vendor_url": "https://unamused.app",
+        "openapi_url": base + "/connector/openapi.json",
+        "mcp_url": base + "/connector/mcp",
+        "auth": {"type": "none"},
+        "generated_by": "Unamused (https://unamused.app) — free, MIT",
+    }
