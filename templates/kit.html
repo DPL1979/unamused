@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+{% block title %}Your Fix Kit — {{ rep.url }} · Unamused{% endblock %}
+{% block content %}
+<section class="wrap report">
+  <p class="meta">{{ rep.url }}<br>Fix Kit · generated from your {{ rep.score }}/100 ({{ rep.grade }}) audit</p>
+  <h1>Your Fix Kit</h1>
+
+  <div class="readme">
+    {{ readme|md|safe }}
+  </div>
+
+  <div class="kit-actions">
+    <a class="btn" href="/kit/{{ rid }}">Download all as .zip</a>
+    <a class="btn secondary" href="/r/{{ rid }}">← Back to your report</a>
+  </div>
+
+  <h2>Copy-paste files</h2>
+  <p class="lede small">Click <b>Copy</b> on any file, then paste it where the install guides say. No downloads needed.</p>
+  {% for fname, content in paste_files.items() %}
+  <div class="kit-file">
+    <div class="kit-file-head">
+      <code>{{ fname }}</code>
+      <button class="copy-btn" onclick="copyFile(this, 'kf{{ loop.index }}')">Copy</button>
+    </div>
+    <pre id="kf{{ loop.index }}">{{ content }}</pre>
+  </div>
+  {% endfor %}
+
+  {% if guides %}
+  <h2>Install guides</h2>
+  <p class="lede small">Pick your platform — each guide takes about 5 minutes.</p>
+  {% for fname, content in guides.items() %}
+  <details class="kit-guide">
+    <summary>{{ fname.replace('guides/', '').replace('.md', '')|title }}</summary>
+    <div class="guide-body">{{ content|md|safe }}</div>
+  </details>
+  {% endfor %}
+  {% endif %}
+
+  <div class="lead-strip">
+    <p><b>Done?</b> <a href="/">Re-audit free</a> — score 85+ and the AMUSED badge is yours.</p>
+  </div>
+</section>
+<script>
+function copyFile(btn, id) {
+  var t = document.getElementById(id).innerText;
+  function done() {
+    btn.textContent = 'Copied ✓';
+    setTimeout(function(){ btn.textContent = 'Copy'; }, 1600);
+  }
+  function fallback() {
+    var ta = document.createElement('textarea');
+    ta.value = t;
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand('copy'); done(); }
+    catch (e) { btn.textContent = 'Copy failed'; }
+    document.body.removeChild(ta);
+  }
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(t).then(done, fallback);
+  } else { fallback(); }
+}
+</script>
+{% endblock %}
