@@ -103,15 +103,20 @@ def client_ip():
                                request.remote_addr or "").split(",")[0].strip()
 
 
-def hit_rate(key):
+def hit_rate_limit(key, max_hits, window):
     """Record one hit against a rate-limit bucket. False when over the limit."""
     now = time.time()
-    hits = [t for t in RATE.get(key, []) if now - t < RATE_WINDOW]
-    if len(hits) >= RATE_MAX:
+    hits = [t for t in RATE.get(key, []) if now - t < window]
+    if len(hits) >= max_hits:
         return False
     hits.append(now)
     RATE[key] = hits
     return True
+
+
+def hit_rate(key):
+    """Record one hit against a rate-limit bucket. False when over the limit."""
+    return hit_rate_limit(key, RATE_MAX, RATE_WINDOW)
 
 
 ANALYTICS_FILE = os.path.join(DATA_DIR, "analytics.json")
@@ -581,6 +586,62 @@ def agent_action(aid, name):
     return result, (200 if ok else 400)
 
 
+@app.route("/a/<aid>/status")
+def agent_status(aid):
+    """Pollable status for one business's agent API."""
+    aid, record = load_agent_api(aid)
+    if record is None:
+        return {"error": "not found"}, 404
+    limited = _status_limited()
+    if limited:
+        return limited
+    return agentapi.business_status(DATA_DIR, aid)
+
+
+@app.route("/a/<aid>/changes")
+def agent_changes(aid):
+    """Delta poll for one business's agent API."""
+    aid, record = load_agent_api(aid)
+    if record is None:
+        return {"error": "not found"}, 404
+    limited = _status_limited()
+    if limited:
+        return limited
+    ch = agentapi.changes_since(DATA_DIR, request.args.get("since", ""), aid)
+    if ch is None:
+        return {"error": "Provide 'since' as an ISO-8601 timestamp, e.g. "
+                         "?since=2026-09-20T00:00:00Z"}, 400
+    return ch
+
+
+@app.route("/a/<aid>/deletion/request", methods=["POST"])
+def agent_deletion_request(aid):
+    """'Forget me', step 1 for one business: mint a deletion token."""
+    aid, record = load_agent_api(aid)
+    if record is None:
+        return {"error": "not found"}, 404
+    if not hit_rate("del:" + client_ip()):
+        return {"error": "Rate limited — try again later."}, 429
+    ok, result = agentapi.request_deletion(DATA_DIR, aid)
+    if ok:
+        track("deletion_request")
+    return result, (200 if ok else 400)
+
+
+@app.route("/a/<aid>/deletion/confirm", methods=["POST"])
+def agent_deletion_confirm(aid):
+    """'Forget me', step 2: burn the token, delete, return a receipt.
+    The deletion token itself authorizes this call, so it works even
+    after the record is gone."""
+    if not hit_rate("del:" + client_ip()):
+        return {"error": "Rate limited — try again later."}, 429
+    body = request.get_json(silent=True) or {}
+    ok, result = agentapi.confirm_deletion(DATA_DIR, body.get("deletion_token", ""))
+    if ok:
+        track("deletion_confirm")
+    return result, (200 if ok else 400)
+
+
 @app.route("/health")
 def health():
     return "ok", 200
@@ -664,6 +725,91 @@ def connector_action(business_id, action_name):
     return result, (200 if ok else 400)
 
 
+# ---- Pollable status: lightweight endpoints for background agents ----
+#
+# Agents poll these instead of re-reading everything. Generous rate limit
+# (120/hour) so a 5-minute poll cadence never trips it; the documented
+# recommendation is one check per 300 seconds.
+
+STATUS_LIMIT = (120, 3600)
+
+
+def _status_limited():
+    if not hit_rate_limit("status:" + client_ip(), *STATUS_LIMIT):
+        return {"error": "Rate limited — poll at most every 5 minutes."}, 429
+    return None
+
+
+@app.route("/connector/businesses/<business_id>/status")
+def connector_business_status(business_id):
+    limited = _status_limited()
+    if limited:
+        return limited
+    st = agentapi.business_status(DATA_DIR, business_id)
+    if st is None:
+        return {"error": "not found"}, 404
+    return st
+
+
+@app.route("/connector/action-log/<log_id>")
+def connector_action_log(log_id):
+    limited = _status_limited()
+    if limited:
+        return limited
+    entry = agentapi.get_log_entry(DATA_DIR, log_id)
+    if entry is None:
+        return {"error": "not found"}, 404
+    return entry
+
+
+@app.route("/connector/changes")
+def connector_changes():
+    limited = _status_limited()
+    if limited:
+        return limited
+    ch = agentapi.changes_since(DATA_DIR, request.args.get("since", ""),
+                                request.args.get("business_id"))
+    if ch is None:
+        return {"error": "Provide 'since' as an ISO-8601 timestamp, e.g. "
+                         "?since=2026-09-20T00:00:00Z"}, 400
+    return ch
+
+
+# ---- Data deletion ("forget me") ----
+
+@app.route("/connector/deletion/request", methods=["POST"])
+def connector_deletion_request():
+    """Step 1: mint a single-use deletion token. Nothing is deleted yet."""
+    if not hit_rate("del:" + client_ip()):
+        return {"error": "Rate limited — try again later."}, 429
+    body = request.get_json(silent=True) or {}
+    ok, result = agentapi.request_deletion(DATA_DIR, body.get("business_id", ""))
+    if ok:
+        track("deletion_request")
+    return result, (200 if ok else 400)
+
+
+@app.route("/connector/deletion/confirm", methods=["POST"])
+def connector_deletion_confirm():
+    """Step 2: burn the token, delete everything, return a receipt."""
+    if not hit_rate("del:" + client_ip()):
+        return {"error": "Rate limited — try again later."}, 429
+    body = request.get_json(silent=True) or {}
+    ok, result = agentapi.confirm_deletion(DATA_DIR, body.get("deletion_token", ""))
+    if ok:
+        track("deletion_confirm")
+    return result, (200 if ok else 400)
+
+
+@app.route("/connector/brief")
+def connector_brief():
+    """Login-free brief written for AI agents: the onboarding UX for
+    'ask Muse to create a Custom Connector'. No JS, no cookies."""
+    track("brief_page")
+    return render_template("brief.html", base=api_base(),
+                           tools=agentapi.AGGREGATOR_TOOLS)
+
+
 @app.route("/badge")
 def badge_page():
     """One-click embed page for the AMUSED badge."""
@@ -720,6 +866,8 @@ def sitemap():
            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
            '  <url><loc>https://unamused.app/</loc></url>\n'
            '  <url><loc>https://unamused.app/api</loc></url>\n'
+           '  <url><loc>https://unamused.app/connector</loc></url>\n'
+           '  <url><loc>https://unamused.app/connector/brief</loc></url>\n'
            '</urlset>\n')
     return Response(xml, mimetype="application/xml")
 
@@ -732,6 +880,7 @@ def llms_txt():
             "\n"
             "## Key pages\n"
             "- Audit your site (free): https://unamused.app/\n"
+            "- Agent connector brief (start here to connect an AI agent): https://unamused.app/connector/brief\n"
             "- Method and source code: https://github.com/DPL1979/unamused\n"
             "\n"
             "## What it scores\n"
