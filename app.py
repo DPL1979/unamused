@@ -19,6 +19,7 @@ from flask import Flask, request, render_template, redirect, url_for, abort, sen
 
 import audit as engine
 import fixkit as fixkit_gen
+import agentapi
 
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(APP_ROOT, "data")
@@ -370,6 +371,164 @@ def api_kit(rid):
 @app.route("/healthz")
 def healthz():
     return "ok", 200
+
+
+# ---- Per-business Agent API ("an API for any customer for Muse") ----
+
+def _api_path(aid):
+    return os.path.join(DATA_DIR, "agentapi-%s.json" % aid)
+
+
+def load_agent_api(aid):
+    """Return (aid, record) or (None, None) if missing/invalid."""
+    if not agentapi.API_ID_RE.match(aid or ""):
+        return None, None
+    path = _api_path(aid)
+    if not os.path.exists(path):
+        return None, None
+    try:
+        with open(path) as f:
+            return aid, json.load(f)
+    except Exception:
+        return None, None
+
+
+@app.route("/a/new/<rid>")
+def agent_builder(rid):
+    """Form to define a business's agent actions, prefilled from its audit."""
+    _rid, rep = load_report(rid)
+    if rep is None:
+        return render_template("error.html",
+                               message="Couldn't find that report. Run a free audit first."), 404
+    biz = ""
+    try:
+        biz = urllib.parse.urlparse(rep.get("final_url") or rep.get("url") or "").hostname or ""
+        biz = biz[4:] if biz.startswith("www.") else biz
+    except Exception:
+        pass
+    return render_template("agent_new.html", rid=rid, rep=rep, business=biz,
+                           templates=agentapi.ACTION_TEMPLATES)
+
+
+@app.route("/a/new", methods=["POST"])
+def agent_create():
+    """Create a hosted agent API from the builder form (rate-limited)."""
+    if not hit_rate("agentnew:" + request.remote_addr):
+        return render_template("error.html",
+                               message="Too many API creations — try again later."), 429
+    business = (request.form.get("business") or "").strip()[:120]
+    url = (request.form.get("url") or "").strip()[:500]
+    contact_email = (request.form.get("contact_email") or "").strip()[:120]
+    if not business:
+        return render_template("error.html",
+                               message="Give your business a name."), 400
+    names = request.form.getlist("action_name")
+    actions, errors = [], []
+    for i, name in enumerate(names):
+        raw = {
+            "name": name,
+            "title": request.form.getlist("action_title")[i]
+                     if i < len(request.form.getlist("action_title")) else "",
+            "description": request.form.getlist("action_desc")[i]
+                           if i < len(request.form.getlist("action_desc")) else "",
+            "requires_approval": request.form.get("action_approval_%d" % i) == "on",
+            "channel": {
+                "type": request.form.get("action_channel_%d" % i),
+                "url": request.form.get("action_webhook_%d" % i),
+                "url_template": request.form.get("action_link_%d" % i),
+            },
+            "params": [],
+        }
+        # params arrive as action_pname_<i>_<j> etc.
+        j = 0
+        while True:
+            pn = request.form.get("action_pname_%d_%d" % (i, j))
+            if pn is None:
+                break
+            if pn.strip():
+                raw["params"].append({
+                    "name": pn,
+                    "type": request.form.get("action_ptype_%d_%d" % (i, j)) or "string",
+                    "required": request.form.get("action_preq_%d_%d" % (i, j)) == "on",
+                    "description": request.form.get("action_pdesc_%d_%d" % (i, j)) or "",
+                })
+            j += 1
+        action, err = agentapi.validate_action(raw)
+        if err:
+            errors.append(err)
+        else:
+            actions.append(action)
+    if errors or not actions:
+        return render_template("error.html",
+                               message="; ".join(errors) or
+                               "Add at least one action."), 400
+    if len(actions) > 5:
+        return render_template("error.html",
+                               message="Keep it to 5 actions for now."), 400
+    record = agentapi.build_record(business, url, actions, contact_email)
+    with open(_api_path(record["id"]), "w") as f:
+        json.dump(record, f)
+    return redirect(url_for("agent_page", aid=record["id"]))
+
+
+@app.route("/a/<aid>")
+def agent_page(aid):
+    """Human page for a business's agent API: endpoints, copy-paste, test."""
+    aid, record = load_agent_api(aid)
+    if record is None:
+        return render_template("error.html",
+                               message="Couldn't find that agent API."), 404
+    base = api_base()
+    return render_template("agent_page.html", aid=aid, record=record, base=base,
+                           openapi=json.dumps(agentapi.openapi_spec(record, base), indent=2))
+
+
+@app.route("/a/<aid>/openapi.json")
+def agent_openapi(aid):
+    aid, record = load_agent_api(aid)
+    if record is None:
+        return {"error": "not found"}, 404
+    return agentapi.openapi_spec(record, api_base())
+
+
+@app.route("/a/<aid>/manifest.json")
+def agent_manifest(aid):
+    aid, record = load_agent_api(aid)
+    if record is None:
+        return {"error": "not found"}, 404
+    return agentapi.connector_manifest(record, api_base())
+
+
+@app.route("/a/<aid>/mcp", methods=["POST"])
+def agent_mcp(aid):
+    """MCP server endpoint (Streamable HTTP, stateless JSON-RPC)."""
+    aid, record = load_agent_api(aid)
+    if record is None:
+        return {"jsonrpc": "2.0", "id": None,
+                "error": {"code": -32600, "message": "unknown agent API"}}, 404
+    if not hit_rate("agentcall:" + request.remote_addr):
+        return {"jsonrpc": "2.0", "id": None,
+                "error": {"code": -32000, "message": "rate limited"}}, 429
+    payload = request.get_json(silent=True)
+    if payload is None:
+        return {"jsonrpc": "2.0", "id": None,
+                "error": {"code": -32700, "message": "parse error"}}, 400
+    resp = agentapi.mcp_handle(record, payload)
+    if resp is None:
+        return "", 202  # JSON-RPC notification: no response
+    return resp
+
+
+@app.route("/a/<aid>/actions/<name>", methods=["POST"])
+def agent_action(aid, name):
+    """Direct REST execution of one action."""
+    aid, record = load_agent_api(aid)
+    if record is None:
+        return {"error": "not found"}, 404
+    if not hit_rate("agentcall:" + request.remote_addr):
+        return {"error": "Rate limited — try again later."}, 429
+    ok, result = agentapi.execute_action(record, name, request.get_json(silent=True) or {})
+    return result, (200 if ok else 400)
 
 
 @app.route("/health")
