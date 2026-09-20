@@ -57,6 +57,15 @@
     <a href="/">re-audit free</a> — score 85+ and the badge is yours.</p>
   </div>
 
+  {% if r.score >= 85 %}
+  <div class="cta-box">
+    <h3>🎖 You earned the AMUSED badge</h3>
+    <p><img src="{{ url_for('static', filename='badge.svg') }}" alt="AMUSED — agent-ready site, audited by Unamused" width="220"></p>
+    <p>Paste this on your site to show it:</p>
+    <p><code>&lt;a href="https://unamused.app"&gt;&lt;img src="https://unamused.app/static/badge.svg" alt="AMUSED — agent-ready, audited by Unamused"&gt;&lt;/a&gt;</code></p>
+  </div>
+  {% endif %}
+
   <p class="audit-again"><a href="/">← Audit another site</a></p>
   <p class="fine">Methodology: weighted toward what lets an agent complete a task — structured
   business data and a machine-usable action surface (booking/ordering). llms.txt is checked
