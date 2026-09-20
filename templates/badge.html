@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+{% block title %}AMUSED badge — Unamused{% endblock %}
+{% block content %}
+<section class="wrap">
+  <p class="meta">The AMUSED badge</p>
+  <h1>Show the world your site is agent-ready</h1>
+  <p class="lede">Scored 85+ on a free Unamused audit? You earned the AMUSED badge.
+  Paste the snippet below into your site's footer — it links back to your report,
+  so visitors can see the receipts.</p>
+
+  <div class="cta-box">
+    <p><img src="{{ url_for('static', filename='badge.svg') }}"
+       alt="AMUSED — agent-ready site, audited by Unamused" width="220"></p>
+    <p>One click, paste into your HTML:</p>
+    <div class="kit-file">
+      <div class="kit-file-head"><code>embed snippet</code>
+        <button class="copy-btn" onclick="copyFile(this, 'badge1')">Copy</button></div>
+      <pre id="badge1">&lt;a href="{{ base }}"&gt;&lt;img src="{{ base }}/static/badge.svg" alt="AMUSED — agent-ready, audited by Unamused"&gt;&lt;/a&gt;</pre>
+    </div>
+  </div>
+
+  <h2>The rules</h2>
+  <ul>
+    <li>The badge is earned, not bought: only sites scoring <b>85+</b> on an Unamused audit may display it.</li>
+    <li>Scores change as your site changes — <a href="/">re-audit free</a> any time to confirm you still qualify.</li>
+    <li>Don't edit the badge artwork or the link. That's the whole deal.</li>
+  </ul>
+  <p>Haven't been audited yet? <a href="/">Run the free audit</a> — it takes under a minute.</p>
+  <p class="fine">Unamused is an independent project, not affiliated with Meta. The AMUSED badge
+  is our own standard, not an official certification.</p>
+</section>
+{% endblock %}
