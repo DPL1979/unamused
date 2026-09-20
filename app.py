@@ -24,6 +24,7 @@ import agentapi
 APP_ROOT = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(APP_ROOT, "data")
 os.makedirs(DATA_DIR, exist_ok=True)
+agentapi.ensure_seed_data(DATA_DIR)
 
 app = Flask(__name__)
 
@@ -518,7 +519,7 @@ def agent_mcp(aid):
     if payload is None:
         return {"jsonrpc": "2.0", "id": None,
                 "error": {"code": -32700, "message": "parse error"}}, 400
-    resp = agentapi.mcp_handle(record, payload)
+    resp = agentapi.mcp_handle(record, payload, DATA_DIR)
     if resp is None:
         return "", 202  # JSON-RPC notification: no response
     return resp
@@ -526,13 +527,16 @@ def agent_mcp(aid):
 
 @app.route("/a/<aid>/actions/<name>", methods=["POST"])
 def agent_action(aid, name):
-    """Direct REST execution of one action."""
+    """Direct REST execution of one action (approval-gated actions need
+    a token: first call returns approval_required + approval_token)."""
     aid, record = load_agent_api(aid)
     if record is None:
         return {"error": "not found"}, 404
     if not hit_rate("agentcall:" + request.remote_addr):
         return {"error": "Rate limited — try again later."}, 429
-    ok, result = agentapi.execute_action(record, name, request.get_json(silent=True) or {})
+    body = request.get_json(silent=True) or {}
+    ok, result = agentapi.request_action(
+        DATA_DIR, record, name, body, approval_token=body.get("approval_token"))
     return result, (200 if ok else 400)
 
 
@@ -599,15 +603,24 @@ def connector_mcp():
 
 @app.route("/connector/actions/<business_id>/<action_name>", methods=["POST"])
 def connector_action(business_id, action_name):
-    """Direct REST execution of one business's action via the connector."""
+    """Direct REST execution of one business's action via the connector
+    (approval-gated actions need a token: first call returns
+    approval_required + approval_token)."""
     rec = agentapi.load_record(DATA_DIR, business_id)
     if rec is None:
         return {"error": "not found"}, 404
     if not hit_rate("connector:" + request.remote_addr):
         return {"error": "Rate limited — try again later."}, 429
-    ok, result = agentapi.execute_action(
-        rec, action_name, request.get_json(silent=True) or {})
+    body = request.get_json(silent=True) or {}
+    ok, result = agentapi.request_action(
+        DATA_DIR, rec, action_name, body, approval_token=body.get("approval_token"))
     return result, (200 if ok else 400)
+
+
+@app.route("/badge")
+def badge_page():
+    """One-click embed page for the AMUSED badge."""
+    return render_template("badge.html", base=api_base())
 
 
 @app.route("/robots.txt")
