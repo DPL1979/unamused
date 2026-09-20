@@ -230,7 +230,12 @@ def load_guide(name):
         return None
 
 
-def generate(url, out_dir="."):
+def build_kit(url):
+    """Crawl the site and build every Fix Kit file.
+
+    Returns (files, report) where files maps "llms.txt" -> content, etc.
+    Shared by the zip download, the web kit page, and the API.
+    """
     rep = audit.audit(url)
     if rep.get("error"):
         raise RuntimeError("Audit failed: %s" % rep["error"])
@@ -323,6 +328,12 @@ def generate(url, out_dir="."):
         "\n_Stuck? Everything is free and open source — open an issue at "\
         "https://github.com/DPL1979/unamused._\n")
 
+    return files, rep
+
+
+def generate(url, out_dir="."):
+    files, rep = build_kit(url)
+    base = "%s://%s" % tuple(urllib.parse.urlparse(rep["final_url"])[:2])
     slug = re.sub(r"[^a-z0-9]+", "-", urllib.parse.urlparse(base).netloc.lower()).strip("-")
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
     zipname = os.path.join(out_dir, "fixkit-%s-%s.zip" % (slug, stamp))
