@@ -109,3 +109,22 @@ footer{border-top:1px solid var(--line);margin-top:40px}
 .audit-again{margin-top:24px}
 a{color:var(--accent)}
 @media(max-width:560px){.audit-form,.lead-form{flex-direction:column}}
+
+/* Fix Kit web page */
+.kit-file{border:1px solid var(--line);border-radius:14px;margin:18px 0;overflow:hidden;background:#fff}
+.kit-file-head{display:flex;justify-content:space-between;align-items:center;
+  padding:12px 16px;background:#f5f2ea;border-bottom:1px solid var(--line)}
+.kit-file-head code{font-weight:700;font-size:15px}
+.copy-btn{padding:8px 16px;font-size:13px;font-weight:700;border:none;border-radius:8px;
+  background:#1c1a17;color:#f5f2ea;cursor:pointer}
+.copy-btn:hover{opacity:.85}
+.kit-file pre{margin:0;padding:16px;overflow-x:auto;font-size:13px;line-height:1.5;
+  max-height:420px;overflow-y:auto;background:#fff}
+.kit-guide{border:1px solid var(--line);border-radius:14px;margin:12px 0;background:#fff}
+.kit-guide summary{padding:14px 16px;font-weight:700;cursor:pointer;list-style:none}
+.kit-guide summary::-webkit-details-marker{display:none}
+.kit-guide summary:before{content:"▸ ";color:var(--accent)}
+.kit-guide[open] summary:before{content:"▾ "}
+.kit-guide .guide-body{padding:0 16px 16px;font-size:15px}
+.kit-guide .guide-body h3,.kit-guide .guide-body h4{margin:16px 0 8px}
+.kit-actions{display:flex;gap:12px;flex-wrap:wrap;margin:24px 0}
