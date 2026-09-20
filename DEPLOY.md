@@ -62,9 +62,9 @@ The app reads `X-Forwarded-For` for rate limiting — keep that header.
 
 ## Ops notes
 
-- Audits run synchronously (~5–15s each); gunicorn `-w 2` handles a few concurrent
-  users. If traffic grows, move audits to a worker queue.
-- Leads land in `data/leads.db` (SQLite). Back it up.
+- Audits run synchronously (~5–15s each); gunicorn `-w 1 --threads 4` handles a
+  few concurrent users. If traffic grows, move audits to a worker queue.
+- Audit reports persist as JSON in `data/` (see `DATA_DIR` in app.py). Back it up.
 - Report JSON is persisted under `data/` so shared links survive restarts.
 - Rate limit: 10 audits/IP/hour (in-memory; use Redis if multi-worker matters).
 - SSRF guard: only public http(s) hosts are fetched; private/loopback/link-local
