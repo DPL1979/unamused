@@ -13,15 +13,26 @@ Execution channels (V1):
   - webhook: POST JSON {action, params} to the business's URL (SSRF-guarded)
   - link:    return a deep URL with params filled in (booking providers etc.)
 
-Actions that touch money or commitments should set requires_approval=True;
-the flag is surfaced in the OpenAPI spec, the MCP tool annotations, and the
-manifest so the agent asks the human before calling.
+Actions that touch money or commitments should set requires_approval=True.
+Approval is server-enforced: the first call only validates the parameters
+and returns a single-use approval_token (10-minute TTL). The action runs
+only when called again with that token — after a human has said yes.
+Tokens bind the exact approved parameters, so they can't be tampered with.
+
+Webhooks are signed: every outbound POST carries X-Unamused-Signature
+(HMAC-SHA256 over "<unix-timestamp>.<raw-body>" with the business's
+webhook_secret), X-Unamused-Timestamp, and X-Unamused-Idempotency-Key.
+Receivers should verify the signature and reject timestamps outside a
++-5 minute window to stop replays.
 """
 
+import hashlib
+import hmac
 import ipaddress
 import json
 import os
 import re
+import secrets
 import socket
 import time
 import urllib.parse
@@ -192,8 +203,117 @@ def validate_action(raw):
 
 
 def new_api_id():
-    import secrets
     return secrets.token_hex(6)
+
+
+APPROVAL_TTL = 600  # approval tokens live 10 minutes and are single-use
+
+
+def _approval_path(data_dir, token):
+    safe = re.sub(r"[^A-Za-z0-9_-]", "", token or "")
+    return os.path.join(data_dir, "approval-%s.json" % safe)
+
+
+def _purge_expired_approvals(data_dir):
+    """Best-effort cleanup of stale approval token files."""
+    try:
+        names = os.listdir(data_dir)
+    except Exception:
+        return
+    now = time.time()
+    for fn in names:
+        if not (fn.startswith("approval-") and fn.endswith(".json")):
+            continue
+        p = os.path.join(data_dir, fn)
+        try:
+            with open(p) as f:
+                exp = json.load(f).get("expires_at", 0)
+            if exp < now:
+                os.remove(p)
+        except Exception:
+            try:
+                os.remove(p)
+            except Exception:
+                pass
+
+
+def prepare_approval(data_dir, record, action_name, params):
+    """Validate params for an approval-gated action and mint a single-use
+    token instead of executing. Returns (True, result-with-token) or
+    (False, error)."""
+    action = next((a for a in record["actions"] if a["name"] == action_name), None)
+    if not action:
+        return False, {"error": "unknown action: %s" % action_name}
+    clean, err = coerce_params(action, params or {})
+    if err:
+        return False, {"error": err}
+    _purge_expired_approvals(data_dir)
+    token = secrets.token_urlsafe(32)
+    pending = {
+        "business_id": record["id"],
+        "action": action_name,
+        "params": clean,  # token binds the exact approved parameters
+        "created_at": utcnow(),
+        "expires_at": time.time() + APPROVAL_TTL,
+    }
+    try:
+        with open(_approval_path(data_dir, token), "w") as f:
+            json.dump(pending, f)
+    except Exception as e:
+        return False, {"error": "could not create approval: %s" % str(e)[:100]}
+    return True, {
+        "approval_required": True,
+        "approval_token": token,
+        "action": action_name,
+        "params": clean,
+        "expires_in": APPROVAL_TTL,
+        "message": ("'%s' commits %s, so it needs a human's approval. Show "
+                    "them the action and parameters, get a yes, then call "
+                    "again with approval_token to run it."
+                    % (action["title"], record["business"])),
+    }
+
+
+def confirm_approval(data_dir, token, business_id=None):
+    """Burn a single-use approval token and execute the bound action.
+    Returns (ok, result)."""
+    path = _approval_path(data_dir, token)
+    try:
+        with open(path) as f:
+            pending = json.load(f)
+    except Exception:
+        return False, {"error": "unknown or expired approval token"}
+    try:
+        os.remove(path)  # single use: burn before executing
+    except Exception:
+        pass
+    if pending.get("expires_at", 0) < time.time():
+        return False, {"error": "approval token expired — prepare the action again"}
+    if business_id and pending.get("business_id") != business_id:
+        return False, {"error": "approval token does not match this business"}
+    record = load_record(data_dir, pending.get("business_id") or "")
+    if record is None:
+        return False, {"error": "business no longer exists"}
+    idem = hashlib.sha256(("approval:" + token).encode()).hexdigest()[:32]
+    return execute_action(record, pending.get("action"), pending.get("params"),
+                          data_dir=data_dir, idempotency_key=idem)
+
+
+def request_action(data_dir, record, action_name, params, approval_token=None):
+    """Enforcing entry point for every action call.
+
+    Approval-gated actions never execute on first call: they return
+    approval_required + a single-use token. Pass the token back (after a
+    human approves) to run. Non-gated actions execute immediately.
+    Returns (ok, result)."""
+    action = next((a for a in record["actions"] if a["name"] == action_name), None)
+    if not action:
+        return False, {"error": "unknown action: %s" % action_name}
+    if action.get("requires_approval"):
+        if approval_token:
+            return confirm_approval(data_dir, approval_token, record["id"])
+        return prepare_approval(data_dir, record, action_name, params)
+    return execute_action(record, action_name, params, data_dir=data_dir)
 
 
 def build_record(business, url, actions, contact_email=""):
@@ -203,6 +323,7 @@ def build_record(business, url, actions, contact_email=""):
         "url": (url or "").strip()[:500],
         "contact_email": (contact_email or "").strip()[:120],
         "actions": actions,
+        "webhook_secret": secrets.token_hex(32),
         "created_at": utcnow(),
         "version": 1,
     }
@@ -249,8 +370,19 @@ def coerce_params(action, params):
     return clean, None
 
 
-def execute_action(record, action_name, params):
-    """Run one action through its channel. Returns (ok, result_dict)."""
+def execute_action(record, action_name, params, data_dir=None,
+                   idempotency_key=None):
+    """Run one action through its channel. Returns (ok, result_dict).
+
+    Webhook deliveries are signed. The business's webhook_secret (generated
+    at creation, backfilled for older records) signs the raw body:
+        X-Unamused-Signature: t=<unix-ts>,v1=<hmac-sha256 hex of "<ts>.<body>">
+    plus X-Unamused-Timestamp and X-Unamused-Idempotency-Key headers.
+    Receivers verify with: hmac.new(secret, (ts + "." + body).encode(),
+    sha256).hexdigest() and should reject timestamps outside +-5 minutes
+    to stop replays. The idempotency key is also inside the JSON body so
+    receivers can dedupe retried deliveries.
+    """
     action = next((a for a in record["actions"] if a["name"] == action_name), None)
     if not action:
         return False, {"error": "unknown action: %s" % action_name}
@@ -269,29 +401,51 @@ def execute_action(record, action_name, params):
                        % (action["title"], record["business"]),
         }
     # webhook
+    secret = record.get("webhook_secret")
+    if not secret and data_dir:
+        # backfill for records created before signing existed
+        secret = secrets.token_hex(32)
+        record["webhook_secret"] = secret
+        try:
+            with open(os.path.join(data_dir,
+                                   "agentapi-%s.json" % record["id"]), "w") as f:
+                json.dump(record, f)
+        except Exception:
+            pass
+    ts = str(int(time.time()))
+    idem = idempotency_key or secrets.token_hex(16)
     payload = json.dumps({
         "source": "unamused-agent-api",
         "api_id": record["id"],
         "business": record["business"],
         "action": action_name,
         "params": clean,
+        "idempotency_key": idem,
         "received_at": utcnow(),
     }).encode("utf-8")
+    headers = {"Content-Type": "application/json",
+               "User-Agent": "Unamused-Agent-API/1.0",
+               "X-Unamused-Timestamp": ts,
+               "X-Unamused-Idempotency-Key": idem}
+    if secret:
+        sig = hmac.new(secret.encode(),
+                       ts.encode() + b"." + payload,
+                       hashlib.sha256).hexdigest()
+        headers["X-Unamused-Signature"] = "t=%s,v1=%s" % (ts, sig)
     try:
         host = urllib.parse.urlparse(chan["url"]).hostname or ""
         if not is_public_host(host):
             return False, {"error": "webhook host is not a public address"}
-        req = urllib.request.Request(
-            chan["url"], data=payload,
-            headers={"Content-Type": "application/json",
-                     "User-Agent": "Unamused-Agent-API/1.0"},
-            method="POST")
+        req = urllib.request.Request(chan["url"], data=payload,
+                                     headers=headers, method="POST")
         opener = urllib.request.build_opener(_PublicRedirectHandler())
         with opener.open(req, timeout=15) as resp:
             body = resp.read(65536).decode("utf-8", "replace")
         return True, {
             "action": action_name,
             "delivered": True,
+            "idempotency_key": idem,
+            "signed": bool(secret),
             "business_response": body[:500],
             "message": "'%s' was sent to %s." % (action["title"], record["business"]),
         }
@@ -316,7 +470,12 @@ def openapi_spec(record, base_url):
         if a["requires_approval"]:
             op["x-unamused-requires-approval"] = True
             op["description"] += (" NOTE: this action commits the business "
-                                  "(booking/order). Ask the human for approval before calling.")
+                                  "(booking/order) and approval is enforced "
+                                  "server-side. The first call only validates "
+                                  "and returns approval_required + a "
+                                  "single-use approval_token (10 min). Call "
+                                  "again with {\"approval_token\": \"...\"} "
+                                  "after the human approves to execute.")
         paths["/a/%s/actions/%s" % (record["id"], a["name"])] = {"post": op}
     return {
         "openapi": "3.1.0",
@@ -360,6 +519,19 @@ def connector_manifest(record, base_url):
 MCP_VERSION = "2025-06-18"
 
 
+def mcp_input_schema(action):
+    """input_schema plus the approval_token field for gated actions."""
+    schema = input_schema(action)
+    if action.get("requires_approval"):
+        schema["properties"]["approval_token"] = {
+            "type": "string",
+            "description": ("Token from a previous approval_required response. "
+                            "Omit on the first call; include it to confirm "
+                            "after the human approves."),
+        }
+    return schema
+
+
 def _rpc_ok(rid, result):
     return {"jsonrpc": "2.0", "id": rid, "result": result}
 
@@ -369,8 +541,12 @@ def _rpc_err(rid, code, message):
             "error": {"code": code, "message": message}}
 
 
-def mcp_handle(record, payload):
-    """Handle one JSON-RPC message for the MCP endpoint (stateless)."""
+def mcp_handle(record, payload, data_dir=None):
+    """Handle one JSON-RPC message for the MCP endpoint (stateless).
+
+    data_dir is required for approval-gated actions (tokens are stored
+    server-side); without it, gated actions fall back to direct execution.
+    """
     if not isinstance(payload, dict) or payload.get("jsonrpc") != "2.0":
         return _rpc_err(None, -32600, "invalid JSON-RPC request")
     rid = payload.get("id")
@@ -394,26 +570,31 @@ def mcp_handle(record, payload):
             tool = {
                 "name": a["name"],
                 "description": a["description"],
-                "inputSchema": input_schema(a),
+                "inputSchema": mcp_input_schema(a),
             }
             if a["requires_approval"]:
                 tool["annotations"] = {"destructiveHint": True}
-                tool["description"] += (" Ask the human for approval before "
-                                        "calling this tool.")
+                tool["description"] += (" This tool is approval-gated: the "
+                                        "first call returns approval_required "
+                                        "+ an approval_token; call again with "
+                                        "the token after the human approves.")
             tools.append(tool)
         return _rpc_ok(rid, {"tools": tools})
     if method == "tools/call":
         name = params.get("name", "")
-        ok, result = execute_action(record, name, params.get("arguments"))
-        text = result.get("message") or ""
-        if result.get("handoff_url"):
-            text = (text + " " if text else "") + "URL: " + result["handoff_url"]
-        if result.get("delivered") and result.get("business_response"):
-            text += " Business response: " + result["business_response"][:300]
-        if not text:
-            text = json.dumps(result)
-        if not ok:
-            text = "Error: " + result.get("error", "unknown error")
+        args = params.get("arguments") or {}
+        if data_dir:
+            ok, result = request_action(
+                data_dir, record, name, args,
+                approval_token=args.get("approval_token"))
+        else:
+            ok, result = execute_action(record, name, args)
+        if result.get("approval_required"):
+            return _rpc_ok(rid, {
+                "content": [{"type": "text",
+                             "text": json.dumps(result)}],
+            })
+        text = _action_result_text(record, ok, result)
         return _rpc_ok(rid, {
             "content": [{"type": "text", "text": text}],
             "isError": not ok,
@@ -453,6 +634,7 @@ def record_summary(record):
         "business_id": record.get("id"),
         "business": record.get("business"),
         "url": record.get("url"),
+        "demo": bool(record.get("demo")),
         "created_at": record.get("created_at"),
         "action_count": len(record.get("actions") or []),
         "actions": [
@@ -542,8 +724,10 @@ AGGREGATOR_TOOLS = [
         "name": "call_action",
         "description": ("Call one of a business's actions. Check get_business "
                         "first: actions flagged requires_approval commit the "
-                        "business (booking, order) — ask the human for approval "
-                        "before calling those."),
+                        "business (booking, order) and are gated server-side — "
+                        "the first call returns approval_required plus a "
+                        "single-use approval_token; ask the human, then call "
+                        "again with approval_token to execute."),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -553,6 +737,10 @@ AGGREGATOR_TOOLS = [
                                "description": "action name from get_business"},
                 "params": {"type": "object",
                            "description": "action parameters"},
+                "approval_token": {"type": "string",
+                                  "description": ("Token from a previous "
+                                                 "approval_required response; "
+                                                 "omit on first call")},
             },
             "required": ["business_id", "action_name"],
             "additionalProperties": False,
@@ -620,8 +808,14 @@ def aggregator_mcp_handle(data_dir, payload):
                     "content": [{"type": "text",
                                  "text": "Error: unknown business_id"}],
                     "isError": True})
-            ok, result = execute_action(rec, args.get("action_name", ""),
-                                        args.get("params"))
+            ok, result = request_action(
+                data_dir, rec, args.get("action_name", ""), args.get("params"),
+                approval_token=args.get("approval_token"))
+            if result.get("approval_required"):
+                return _rpc_ok(rid, {
+                    "content": [{"type": "text",
+                                 "text": json.dumps(result)}],
+                })
             return _rpc_ok(rid, {
                 "content": [{"type": "text",
                              "text": _action_result_text(rec, ok, result)}],
@@ -677,8 +871,11 @@ def aggregator_openapi_spec(base_url):
                     "summary": "Call a business action",
                     "description": ("Executes one action on one business. "
                                     "Actions flagged x-unamused-requires-approval "
-                                    "commit the business (booking/order) — ask "
-                                    "the human for approval before calling."),
+                                    "are gated server-side: the first call "
+                                    "validates and returns approval_required + "
+                                    "a single-use approval_token (10 min); call "
+                                    "again with {\"approval_token\": \"...\"} "
+                                    "after the human approves to execute."),
                     "operationId": "call_action",
                     "x-unamused-requires-approval": True,
                     "parameters": [
@@ -715,3 +912,136 @@ def aggregator_manifest(base_url):
         "auth": {"type": "none"},
         "generated_by": "Unamused (https://unamused.app) — free, MIT",
     }
+
+
+# ---- Seed demos ----
+#
+# An empty directory doesn't demo. These three fictional businesses ship
+# with the app so the connector's full loop (search -> inspect -> approve
+# -> call) works for a first-time visitor. They are clearly marked demo
+# everywhere they appear, use example.com URLs, and their webhooks point
+# at httpbin.org/post (a public echo service) so calls are harmless.
+# Seeded idempotently at startup; deleting the files removes them.
+
+SEED_BUSINESSES = [
+    {
+        "id": "deadbeef0001",
+        "business": "Sunny Smiles Dental (demo)",
+        "url": "https://example.com/sunny-smiles",
+        "actions": [
+            {
+                "name": "book_appointment",
+                "title": "Book a dental appointment",
+                "description": "Book a checkup or cleaning at Sunny Smiles Dental. Demo: no real appointment is made.",
+                "params": [
+                    {"name": "name", "type": "string", "required": True, "description": "Patient's full name"},
+                    {"name": "phone_or_email", "type": "string", "required": True, "description": "Patient's phone or email"},
+                    {"name": "preferred_time", "type": "string", "required": False, "description": "Preferred date/time"},
+                ],
+                "channel": {"type": "webhook", "url": "https://httpbin.org/post"},
+                "requires_approval": True,
+            },
+            {
+                "name": "request_quote",
+                "title": "Request a treatment quote",
+                "description": "Ask Sunny Smiles Dental for a treatment price estimate. Demo: returns a sample quote link.",
+                "params": [
+                    {"name": "name", "type": "string", "required": True, "description": "Patient's full name"},
+                    {"name": "treatment", "type": "string", "required": True, "description": "Treatment to quote"},
+                ],
+                "channel": {"type": "link", "url_template": "https://example.com/sunny-smiles/quote?name={name}&treatment={treatment}"},
+                "requires_approval": False,
+            },
+        ],
+    },
+    {
+        "id": "deadbeef0002",
+        "business": "Mario's Slice Shop (demo)",
+        "url": "https://example.com/marios-slice",
+        "actions": [
+            {
+                "name": "place_order",
+                "title": "Order pizza",
+                "description": "Place a pickup order at Mario's Slice Shop. Demo: no real order is placed.",
+                "params": [
+                    {"name": "name", "type": "string", "required": True, "description": "Customer's full name"},
+                    {"name": "phone_or_email", "type": "string", "required": True, "description": "Customer's phone or email"},
+                    {"name": "items", "type": "string", "required": True, "description": "Pizzas and sides to order"},
+                ],
+                "channel": {"type": "webhook", "url": "https://httpbin.org/post"},
+                "requires_approval": True,
+            },
+            {
+                "name": "contact_business",
+                "title": "Message the shop",
+                "description": "Send a message to Mario's Slice Shop. Demo: goes to the echo service.",
+                "params": [
+                    {"name": "name", "type": "string", "required": True, "description": "Your name"},
+                    {"name": "message", "type": "string", "required": True, "description": "Your message"},
+                ],
+                "channel": {"type": "webhook", "url": "https://httpbin.org/post"},
+                "requires_approval": False,
+            },
+        ],
+    },
+    {
+        "id": "deadbeef0003",
+        "business": "Green Thumb Landscaping (demo)",
+        "url": "https://example.com/green-thumb",
+        "actions": [
+            {
+                "name": "book_appointment",
+                "title": "Book a site visit",
+                "description": "Book a free landscaping estimate visit. Demo: no real visit is scheduled.",
+                "params": [
+                    {"name": "name", "type": "string", "required": True, "description": "Customer's full name"},
+                    {"name": "phone_or_email", "type": "string", "required": True, "description": "Customer's phone or email"},
+                    {"name": "preferred_time", "type": "string", "required": False, "description": "Preferred date/time"},
+                ],
+                "channel": {"type": "link", "url_template": "https://example.com/green-thumb/book?name={name}&when={preferred_time}"},
+                "requires_approval": True,
+            },
+            {
+                "name": "request_quote",
+                "title": "Request a quote",
+                "description": "Ask Green Thumb Landscaping for a project quote. Demo: goes to the echo service.",
+                "params": [
+                    {"name": "name", "type": "string", "required": True, "description": "Customer's full name"},
+                    {"name": "details", "type": "string", "required": True, "description": "What you want quoted"},
+                ],
+                "channel": {"type": "webhook", "url": "https://httpbin.org/post"},
+                "requires_approval": False,
+            },
+        ],
+    },
+]
+
+
+def ensure_seed_data(data_dir):
+    """Write seed demo records that don't exist yet. Idempotent."""
+    try:
+        os.makedirs(data_dir, exist_ok=True)
+    except Exception:
+        return
+    for seed in SEED_BUSINESSES:
+        if not API_ID_RE.match(seed["id"]):
+            continue
+        path = os.path.join(data_dir, "agentapi-%s.json" % seed["id"])
+        if os.path.exists(path):
+            continue
+        record = {
+            "id": seed["id"],
+            "business": seed["business"],
+            "url": seed["url"],
+            "contact_email": "",
+            "actions": seed["actions"],
+            "webhook_secret": secrets.token_hex(32),
+            "demo": True,
+            "created_at": utcnow(),
+            "version": 1,
+        }
+        try:
+            with open(path, "w") as f:
+                json.dump(record, f)
+        except Exception:
+            pass
